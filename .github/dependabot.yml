@@ -1,0 +1,8 @@
+# Dependabot version updates (invarith/backend's decision D12): the actions the
+# repository's CI uses. uv's version and checksums in bootstrap.sh change by hand.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
