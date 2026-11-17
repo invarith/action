@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  python:
+    name: Python
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      - run: uv sync --locked
+      - run: uv run ruff format --check .
+      - run: uv run ruff check .
+      - run: uv run pyright
+      # Includes installing small wheels for real, with uv, from a stand-in for the
+      # Run API on the runner (tests/test_bootstrap.py).
+      - run: uv run pytest -q
+
+  shell:
+    name: Shell
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: shellcheck bootstrap.sh
+
+  # bootstrap.sh for real, on each runner architecture it supports: it fetches uv,
+  # checks it, and has it run bootstrap.py on the Python it provides, which, for a
+  # pull request from a fork, exits without verifying.
+  bootstrap:
+    name: Bootstrap (${{ matrix.runner }})
+    strategy:
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: |
+          event="$RUNNER_TEMP/fork.json"
+          printf '%s' '{"pull_request": {"head": {"repo": {"id": 2}}, "base": {"repo": {"id": 1}}}}' > "$event"
+          GITHUB_ACTION_PATH="$GITHUB_WORKSPACE" GITHUB_EVENT_NAME=pull_request \
+            GITHUB_EVENT_PATH="$event" INVARITH_PYTHON=python3 \
+            ./bootstrap.sh | tee "$RUNNER_TEMP/said.txt"
+          grep --quiet "This pull request comes from a fork" "$RUNNER_TEMP/said.txt"
+
+  all-jobs-passed:
+    name: All jobs passed
+    if: always()
+    needs: [python, shell, bootstrap]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          for result in $RESULTS; do
+            if [ "$result" != success ]; then
+              echo "A job ended with: $result"
+              exit 1
+            fi
+          done

@@ -1,0 +1,40 @@
+name: invarith
+description: Verify the claims in INVARITH.md against the code, with invarith's hosted service.
+author: invarith
+branding:
+  icon: check-circle
+  color: blue
+
+inputs:
+  server:
+    description: The invarith server's address.
+    required: false
+    default: https://api-vrykmtpcja-uc.a.run.app
+  minutes:
+    description: The run's total time, in minutes.
+    required: false
+    default: "15"
+  project:
+    description: The project's directory, holding INVARITH.md.
+    required: false
+    default: "."
+  python:
+    description: >-
+      The project's Python interpreter, with the project's dependencies installed,
+      which runs the harnesses: a name on the PATH, or a path.
+    required: false
+    default: python
+
+runs:
+  using: composite
+  steps:
+    - name: Verify the contract's claims
+      shell: bash
+      # The inputs reach the scripts as environment variables, never written into a
+      # command, so none can change what runs.
+      env:
+        INVARITH_SERVER: ${{ inputs.server }}
+        INVARITH_MINUTES: ${{ inputs.minutes }}
+        INVARITH_PROJECT: ${{ inputs.project }}
+        INVARITH_PYTHON: ${{ inputs.python }}
+      run: '"$GITHUB_ACTION_PATH/bootstrap.sh"'
