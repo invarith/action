@@ -1,0 +1,56 @@
+name: Release
+
+# Tags a release when main's release/invarith.json names a version with no tag yet
+# (README.md, Releases; invarith/backend's decision D56). The tag is the invarith
+# release's version, so invarith/action@vX.Y.Z runs invarith X.Y.Z. A push to main
+# without release/, or whose version is tagged already, tags nothing.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# One release at a time, and one in progress is never cancelled.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write # the tag and the GitHub release
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+
+      - id: version
+        name: Finds the version release/ names, if it has no tag yet
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="$(uv run --no-project --python 3.15 release_notes.py version)"
+          if [ -z "$version" ]; then
+            echo "This commit names no release."
+          elif gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v$version" > /dev/null 2>&1; then
+            echo "v$version is tagged already."
+          else
+            echo "version=$version" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Tags the release
+        if: steps.version.outputs.version != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          uv run --no-project --python 3.15 release_notes.py notes > notes.md
+          cat notes.md
+          gh release create "v$VERSION" --target "$GITHUB_SHA" --title "v$VERSION" \
+            --notes-file notes.md

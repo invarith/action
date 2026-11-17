@@ -218,7 +218,7 @@ def read_release(directory: Path) -> Release:
     if not named.is_file():
         raise Stop(
             "This commit of invarith/action names no invarith release. Pin the action "
-            "to a release tag, such as invarith/action@v0.1.0, or to a release's "
+            "to a release tag, such as invarith/action@v0.6.0, or to a release's "
             "commit."
         )
     try:
