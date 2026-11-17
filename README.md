@@ -95,6 +95,22 @@ uv run pytest
 
 The tests stand in for GitHub's token service and invarith's server. Two of them install small wheels built in the test, for real, with uv.
 
+### Rules and updates
+
+`.github/rulesets/action-main.json` defines the ruleset "CI must pass on main": a pull request can merge into `main` only once the `All jobs passed` check from GitHub Actions has succeeded. That job needs every other CI job, so adding or renaming a job doesn't change the ruleset. The org ruleset "Default branches" covers the rest of the default branch's protection. It's applied once, with:
+
+```bash
+gh api -X POST repos/invarith/action/rulesets --input .github/rulesets/action-main.json
+```
+
+After that, with the ruleset's ID from `gh api repos/invarith/action/rulesets`:
+
+```bash
+gh api -X PUT repos/invarith/action/rulesets/<id> --input .github/rulesets/action-main.json
+```
+
+Dependabot updates the actions CI uses, weekly (`.github/dependabot.yml`). uv's version and checksums in `bootstrap.sh` change by hand.
+
 ## Licence
 
 Apache-2.0. See [LICENSE](LICENSE).
