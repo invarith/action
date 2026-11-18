@@ -28,7 +28,7 @@ jobs:
           fetch-depth: 2
       - uses: astral-sh/setup-uv@v10
       - run: uv sync --locked
-      - uses: invarith/action@v0.1.0
+      - uses: invarith/action@v0.6.0
         with:
           python: .venv/bin/python
 ```
@@ -39,7 +39,7 @@ A project installed with pip, after `actions/setup-python`, can leave `python` a
 - **After the project's dependencies are installed.** The harnesses import the project's code with its dependencies, on the interpreter the `python` input names. Install them the way the project's own CI does.
 - **`fetch-depth: 2`.** On a pull request, the checkout is GitHub's merge commit, and invarith compares it with its first parent, the base.
 - **Permissions:** `id-token: write`, so the job can sign in to invarith with its OIDC token, and otherwise only `contents: read`. No secret is needed.
-- **Pin the action** to a full release tag, such as `invarith/action@v0.1.0`, or to a release's commit SHA. A commit between releases names no invarith release, and fails saying so.
+- **Pin the action** to a full release tag, such as `invarith/action@v0.6.0`, or to a release's commit SHA. A release's tag is the version of the invarith release it runs. A commit between releases names no invarith release, and fails saying so.
 - **Never run it under `pull_request_target`,** which would run a fork's code with this repository's permissions. The action refuses to.
 - **Linux runners only,** on x86_64 or arm64, GitHub-hosted or self-hosted. The runner needs `curl`, `tar` and `sha256sum`.
 
@@ -75,13 +75,24 @@ Each job downloads uv, a Python and those packages: tens of megabytes, from GitH
 
 ## Releases
 
-Each release of this action names one invarith release, in `release/`:
+Each release of this action runs one invarith release, and has its version: `invarith/action@vX.Y.Z` runs invarith X.Y.Z. A change to the action alone ships with the next invarith release (invarith/backend's decision D56). A release's files are in `release/`:
 
 - **`invarith.json`:** the invarith release's version, and each of its packages with its SHA-256;
 - **`cli.txt`:** the third-party packages the CLI and the verifier need, pinned with their hashes, as the invarith release's lockfile has them;
 - **`runtime.txt`:** the third-party packages the Python harness runtime needs, such as Hypothesis, pinned the same way.
 
 `cli.txt` and `runtime.txt` are in the requirements format `uv export` writes.
+
+invarith's release workflow writes the three files and attaches them to invarith's own release. To make the matching release here:
+
+1. On a branch from `main`, download them into `release/`:
+
+   ```bash
+   gh release download vX.Y.Z --repo invarith/backend --dir release --clobber --pattern invarith.json --pattern cli.txt --pattern runtime.txt
+   ```
+
+2. Open a pull request, "Release invarith X.Y.Z", and merge it once CI passes. CI checks the files (`tests/test_release.py`).
+3. On that push to `main`, the release workflow (`.github/workflows/release.yml`) tags `vX.Y.Z` and creates a GitHub release, whose notes list invarith's packages with their SHA-256s, and the pinned packages (`release_notes.py`).
 
 ## Development
 

@@ -21,7 +21,7 @@ required-version = ">=0.13.7"
 select = ["E", "W", "F", "I", "B", "UP", "SIM", "PT", "RUF"]
 
 [tool.pyright]
-include = ["bootstrap.py", "tests"]
+include = ["bootstrap.py", "release_notes.py", "tests"]
 typeCheckingMode = "strict"
 
 [tool.pytest]
