@@ -1,0 +1,10 @@
+{
+  "version": "0.6.0",
+  "packages": {
+    "invarith_adapter_python-0.6.0-py3-none-any.whl": "7c19c1b9259d8c6817dbc6508bc0214a53d8694b27f3bc0f3b40b4e07df31b55",
+    "invarith_cli-0.6.0-py3-none-any.whl": "81863aa738e94b99906f21b82cbe563496c17250f0ab97ea593354ef41fa5a42",
+    "invarith_core-0.6.0-py3-none-any.whl": "06e08549afc1719c7134f9ca043d65141da1637ad1d67815e231b24693fa83f5",
+    "invarith_runtime-0.6.0-py3-none-any.whl": "d8e903d885cfe3e496c1ecda52f897c59e18855721aa47657b52ace9c3f33c0c",
+    "invarith_verifier-0.6.0-py3-none-any.whl": "9b63a3c67c33db40cf202baa0d26dd3ad58fa40e5a3284541aae14fa6d5e05e4"
+  }
+}
