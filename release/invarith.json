@@ -1,10 +1,10 @@
 {
-  "version": "0.6.0",
+  "version": "0.7.0",
   "packages": {
-    "invarith_adapter_python-0.6.0-py3-none-any.whl": "7c19c1b9259d8c6817dbc6508bc0214a53d8694b27f3bc0f3b40b4e07df31b55",
-    "invarith_cli-0.6.0-py3-none-any.whl": "81863aa738e94b99906f21b82cbe563496c17250f0ab97ea593354ef41fa5a42",
-    "invarith_core-0.6.0-py3-none-any.whl": "06e08549afc1719c7134f9ca043d65141da1637ad1d67815e231b24693fa83f5",
-    "invarith_runtime-0.6.0-py3-none-any.whl": "d8e903d885cfe3e496c1ecda52f897c59e18855721aa47657b52ace9c3f33c0c",
-    "invarith_verifier-0.6.0-py3-none-any.whl": "9b63a3c67c33db40cf202baa0d26dd3ad58fa40e5a3284541aae14fa6d5e05e4"
+    "invarith_adapter_python-0.7.0-py3-none-any.whl": "fb268904c365265dc123b55f13d9bff4fd4e0cf6aceb7a63178582813a277ea9",
+    "invarith_cli-0.7.0-py3-none-any.whl": "4784ba11712e516e1e539f0abd1290b07126a41bb09259eedfdea1288d8d31d5",
+    "invarith_core-0.7.0-py3-none-any.whl": "7ace7d90ed8c7d3619b74918824cc34bf0c5dd843016f8e5301738c61a21dd91",
+    "invarith_runtime-0.7.0-py3-none-any.whl": "d93f15efd40509623dbdc963c0767f5aa5433a40c7cc758c34ce03b88e67fd5b",
+    "invarith_verifier-0.7.0-py3-none-any.whl": "d98b7bbc685ad594f6bc1b59b4121554792868534059e7788fbba09d0728572b"
   }
 }
