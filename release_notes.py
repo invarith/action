@@ -66,6 +66,14 @@ def notes(directory: Path | None = None) -> str:
         "|---|---|",
         *(f"| `{name}` | `{sha}` |" for name, sha in sorted(packages.items())),
     ]
+    if named.get("java_runtime"):
+        lines += [
+            "",
+            "The Java runtime's jar holds its one third-party dependency, Byte Buddy, "
+            "shaded into it, and the Maven extension's holds none, since the Maven "
+            "running the build provides its API. invarith's own release notes give "
+            "Byte Buddy's version.",
+        ]
     for title, name in (
         ("Pinned for the CLI and the verifier", "cli.txt"),
         ("Pinned for the Python harness runtime", "runtime.txt"),

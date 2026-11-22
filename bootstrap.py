@@ -328,8 +328,7 @@ def read_release(directory: Path) -> Release:
     if not named.is_file():
         raise Stop(
             "This commit of invarith/action names no invarith release. Pin the action "
-            "to a release tag, such as invarith/action@v0.6.0, or to a release's "
-            "commit."
+            "to a release tag, invarith/action@vX.Y.Z, or to a release's commit."
         )
     try:
         found = _fields(json.loads(named.read_text()))
@@ -417,7 +416,7 @@ def _markers(
     lists them under `markers` (invarith's D87): each a file's name, looked for in the
     project's directory. A release from before markers, such as v0.8.0's, makes a
     TypeScript project one with a package.json (D84). Each runtime the release holds
-    needs its markers."""
+    needs its markers, and each language with markers needs its runtime."""
     if "markers" in found:
         listed = _fields(found["markers"])
         markers = {
@@ -432,6 +431,14 @@ def _markers(
                 f"release/{RELEASE} needs each language's markers, under markers, as "
                 "a list of the names of files."
             )
+        for language in markers:
+            # A runtime dropped from a release whose markers still name it would
+            # otherwise leave its projects without it, and without a word.
+            if not held.get(language, False):
+                raise Stop(
+                    f"release/{RELEASE} names markers for {language}, but holds no "
+                    "runtime for it."
+                )
     else:
         markers = {"typescript": (PACKAGE_JSON,)}
     for language, name in LANGUAGES.items():
