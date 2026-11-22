@@ -35,7 +35,7 @@ jobs:
 
 A project installed with pip, after `actions/setup-python`, can leave `python` at its default.
 
-A TypeScript or JavaScript project, one with a `package.json` in the project's directory, sets up Node.js and installs its packages with `npm ci` instead, with an action release from v0.8.0 on, the first that holds invarith's TypeScript runtime:
+A TypeScript or JavaScript project, one with a `package.json` in the project's directory, sets up Node.js and installs its packages with `npm ci` instead. It needs an action release that holds invarith's TypeScript runtime, whose release notes list `invarith-typescript-runtime-X.Y.Z.tgz` among invarith's packages; releases up to v0.7.0 don't:
 
 ```yaml
     steps:
@@ -47,12 +47,12 @@ A TypeScript or JavaScript project, one with a `package.json` in the project's d
           node-version: 24
           cache: npm
       - run: npm ci
-      - uses: invarith/action@v0.8.0
+      - uses: invarith/action@vX.Y.Z # a release that holds the TypeScript runtime
 ```
 
 - **When it runs:** on pull requests, and on pushes to the default branch. A push's run is what moves invarith's record of the claims forward once a change merges.
 - **After the project's dependencies are installed.** The harnesses import the project's code with its dependencies, on the interpreter the `python` input names, or, for a TypeScript project, on the Node.js the `node` input names, from the project's `node_modules`. Install them the way the project's own CI does.
-- **A TypeScript project** needs Node.js 22 or later, and npm, which the action installs invarith's TypeScript runtime with. It needs no Python: if `python` is left at its default and the runner has no `python`, the action checks the project without its Python runtime, and says so.
+- **A TypeScript project** needs Node.js 22 or later, and npm, which the action installs invarith's TypeScript runtime with, from the npm registry, reading none of the job's npm configuration, such as a registry `actions/setup-node` names for the project's own packages. It needs no Python: if `python` is left at its default, and the runner has no `python`, or one the Python runtime can't be installed for, the action checks the project without its Python runtime, and says so.
 - **`fetch-depth: 2`.** On a pull request, the checkout is GitHub's merge commit, and invarith compares it with its first parent, the base.
 - **Permissions:** `id-token: write`, so the job can sign in to invarith with its OIDC token, and otherwise only `contents: read`. No secret is needed.
 - **Pin the action** to a full release tag, such as `invarith/action@v0.6.0`, or to a release's commit SHA. A release's tag is the version of the invarith release it runs. A commit between releases names no invarith release, and fails saying so.
@@ -96,10 +96,10 @@ Each job downloads uv, a Python and those packages: tens of megabytes, from GitH
 
 Each release of this action runs one invarith release, and has its version: `invarith/action@vX.Y.Z` runs invarith X.Y.Z. A change to the action alone ships with the next invarith release (invarith/backend's decision D56). A release's files are in `release/`:
 
-- **`invarith.json`:** the invarith release's version, and each of its packages with its SHA-256: its wheels, under `packages`, and, from 0.8.0 on, the TypeScript runtime's npm package, under `typescript_runtime`;
+- **`invarith.json`:** the invarith release's version, and each of its packages with its SHA-256: its wheels, under `packages`, and, in a release that holds the TypeScript runtime, its npm package, under `typescript_runtime`;
 - **`cli.txt`:** the third-party packages the CLI and the verifier need, pinned with their hashes, as the invarith release's lockfile has them;
 - **`runtime.txt`:** the third-party packages the Python harness runtime needs, such as Hypothesis, pinned the same way;
-- **`typescript-runtime-lock.json`,** from 0.8.0 on: the third-party npm packages the TypeScript runtime needs, such as tsx and fast-check, as an npm lockfile, each pinned to a version, with the npm registry's URL for it and its integrity (invarith/backend's decision D82).
+- **`typescript-runtime-lock.json`,** in a release that holds the TypeScript runtime: the third-party npm packages the TypeScript runtime needs, such as tsx and fast-check, as an npm lockfile, each pinned to a version, with the npm registry's URL for it and its integrity (invarith/backend's decision D82).
 
 `cli.txt` and `runtime.txt` are in the requirements format `uv export` writes.
 

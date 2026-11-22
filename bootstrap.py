@@ -95,6 +95,9 @@ DEFAULT_NODE = "node"
 # What makes a project a TypeScript project, in its directory (invarith's D84).
 PACKAGE_JSON = "package.json"
 
+# The registry the TypeScript runtime's lockfile pins its packages from.
+NPM_REGISTRY = "https://registry.npmjs.org/"
+
 # The job's means of asking for OIDC tokens, which npm isn't given.
 TOKEN_VARIABLES = ("ACTIONS_ID_TOKEN_REQUEST_URL", "ACTIONS_ID_TOKEN_REQUEST_TOKEN")
 
@@ -192,8 +195,8 @@ def bootstrap(
     release = read_release(action / "release")
     inputs = read_inputs(environment)
     typescript = release.typescript is not None and typescript_project(inputs.project)
-    python = project_python(inputs, typescript, out)
     node = project_node(inputs.node, environment) if typescript else None
+    python = project_python(inputs, typescript, out)
     home = Path(_required(environment, "RUNNER_TEMP")) / "invarith"
     home.mkdir(parents=True, exist_ok=True)
     token = job_token(environment, send)
@@ -201,7 +204,23 @@ def bootstrap(
     links = release_links(inputs.server, release.version, wanted, token, send)
     downloaded = download(wanted, links, home / "packages", send)
     uv = environment.get("UV") or shutil.which("uv") or "uv"
-    tools = install(uv, release, downloaded, home, python, execute)
+    install(uv, release, downloaded, home, execute)
+    tools = None
+    if python is not None:
+        # A TypeScript project needs no Python, so an interpreter left at the
+        # default that can't take the runtime, such as one too old, isn't fatal.
+        optional = typescript and inputs.python_given == DEFAULT_PYTHON
+        tools = install_python(uv, release, downloaded, home, python, execute)
+        if tools is None and not optional:
+            raise Stop("uv couldn't install the Python runtime; its message is above.")
+        if tools is None:
+            print(
+                f"::notice title=invarith::invarith's Python runtime couldn't be "
+                f"installed for {python}, so invarith checks this TypeScript project "
+                "without it, and can't check a claim bound in Python. To check one, "
+                "set the python input to the project's interpreter.",
+                file=out,
+            )
     command = [
         str(home / "cli" / "bin" / "invarith"),
         "--server",
@@ -217,7 +236,7 @@ def bootstrap(
         typescript_tools = install_typescript(
             release, package, home, node, environment, execute
         )
-        command += ["--node", node, "--typescript-tools", str(typescript_tools)]
+        command += ["--node", node.node, "--typescript-tools", str(typescript_tools)]
     command += ["--minutes", inputs.minutes]
     print(f"invarith {release.version} is installed; checking.", file=out)
     job = dict(environment)
@@ -289,6 +308,7 @@ def read_release(directory: Path) -> Release:
         lock = directory / TYPESCRIPT_LOCK
         if not lock.is_file():
             raise Stop(f"release/{TYPESCRIPT_LOCK} is missing.")
+        _package_json(lock.read_text())
     return Release(
         version=version,
         packages=packages,
@@ -368,9 +388,21 @@ def project_python(inputs: Inputs, typescript: bool, out: TextIO) -> str | None:
     )
 
 
-def project_node(given: str, environment: Mapping[str, str]) -> str:
+@dataclass(frozen=True)
+class Node:
+    """The project's Node.js, and the npm that installs the TypeScript runtime for
+    it, with `path`, the PATH npm runs with: the Node.js's directory, then the
+    job's."""
+
+    node: str
+    npm: str
+    path: str
+
+
+def project_node(given: str, environment: Mapping[str, str]) -> Node:
     """The project's Node.js, for a TypeScript project: the node input, found on the
-    job's PATH if it's a name, and made absolute if it's a path."""
+    job's PATH if it's a name, and made absolute if it's a path; and npm, beside it
+    or on the job's PATH."""
     node = _executable(given, _job_path(environment))
     if node is None:
         raise Stop(
@@ -379,7 +411,15 @@ def project_node(given: str, environment: Mapping[str, str]) -> str:
             "Set up Node.js before the invarith step, such as with "
             "actions/setup-node, or set the node input to the project's Node.js."
         )
-    return node
+    path = os.pathsep.join([os.path.dirname(node), _job_path(environment)])
+    npm = shutil.which("npm", path=path)
+    if npm is None:
+        raise Stop(
+            f"npm wasn't found beside the project's Node.js, {node}, or on the job's "
+            "PATH, so the TypeScript runtime can't be installed. Set up Node.js with "
+            "its npm, such as with actions/setup-node."
+        )
+    return Node(node=node, npm=npm, path=path)
 
 
 def job_token(environment: Mapping[str, str], send: Fetch) -> str:
@@ -469,15 +509,12 @@ def install(
     release: Release,
     downloaded: Mapping[str, Path],
     home: Path,
-    python: str | None,
     execute: Run,
-) -> Path | None:
-    """Install the CLI, and, for the project's interpreter, if there's one, the
-    Python runtime, and give the runtime's directory."""
+) -> None:
+    """Install the CLI, the verifier, the core and the adapters, in a virtual
+    environment of their own."""
     environment = home / "cli"
-    tools = home / "tools"
     wheels = [downloaded[name] for name in sorted(release.packages)]
-    runtime = [w for w in wheels if w.name.startswith(RUNTIME_WHEEL)]
     others = [str(w) for w in wheels if not w.name.startswith(RUNTIME_WHEEL)]
     cli_python = str(environment / "bin" / "python")
     steps: list[tuple[str, list[str]]] = [
@@ -513,58 +550,64 @@ def install(
             ],
         ),
     ]
-    if python is not None:
-        steps += _python_runtime(uv, release, runtime[0], tools, python)
     for what, command in steps:
         if execute(command, None) != 0:
             raise Stop(f"uv couldn't install {what}; its message is above.")
-    return tools if python is not None else None
 
 
-def _python_runtime(
-    uv: str, release: Release, runtime: Path, tools: Path, python: str
-) -> list[tuple[str, list[str]]]:
-    """The Python runtime's installs, for the project's interpreter."""
-    return [
-        (
-            "the runtime's pinned packages",
-            [
-                uv,
-                "pip",
-                "install",
-                "--no-config",
-                "--python",
-                python,
-                "--target",
-                str(tools),
-                "--require-hashes",
-                "-r",
-                str(release.runtime_requirements),
-            ],
-        ),
-        (
-            "the runtime",
-            [
-                uv,
-                "pip",
-                "install",
-                "--no-config",
-                "--python",
-                python,
-                "--target",
-                str(tools),
-                "--no-deps",
-                str(runtime),
-            ],
-        ),
+def install_python(
+    uv: str,
+    release: Release,
+    downloaded: Mapping[str, Path],
+    home: Path,
+    python: str,
+    execute: Run,
+) -> Path | None:
+    """Install the Python runtime and its pinned packages, for the project's
+    interpreter, and give their directory, or None if uv couldn't, whose message
+    says why."""
+    tools = home / "tools"
+    runtime = next(
+        downloaded[name] for name in release.packages if name.startswith(RUNTIME_WHEEL)
+    )
+    commands = [
+        [
+            uv,
+            "pip",
+            "install",
+            "--no-config",
+            "--python",
+            python,
+            "--target",
+            str(tools),
+            "--require-hashes",
+            "-r",
+            str(release.runtime_requirements),
+        ],
+        [
+            uv,
+            "pip",
+            "install",
+            "--no-config",
+            "--python",
+            python,
+            "--target",
+            str(tools),
+            "--no-deps",
+            str(runtime),
+        ],
     ]
+    for command in commands:
+        if execute(command, None) != 0:
+            return None
+    return tools
 
 
 def install_typescript(
     release: Release,
     package: Path,
     home: Path,
-    node: str,
+    node: Node,
     environment: Mapping[str, str],
     execute: Run,
 ) -> Path:
@@ -574,35 +617,47 @@ def install_typescript(
     exactly those, checks each one's integrity, and, with `--ignore-scripts`, runs
     none of their code; then the runtime's package, unpacked beside them, where `npm
     install` puts a package, once `npm ci` has run, since it empties `node_modules`
-    first."""
+    first.
+
+    npm reads none of the job's npm configuration, from its files or its
+    environment, such as the registry a workflow's `actions/setup-node` names for
+    the project's own packages, which would replace the npm registry in the
+    lockfile's URLs, or packages it omits, such as esbuild's binary, an optional
+    one. It installs from the npm registry, as the lockfile pins, through the
+    job's proxy, if it has one."""
     assert release.typescript_lock is not None
     tools = home / "typescript"
     tools.mkdir(parents=True, exist_ok=True)
     locked = release.typescript_lock.read_text()
     (tools / "package-lock.json").write_text(locked)
     (tools / PACKAGE_JSON).write_text(json.dumps(_package_json(locked), indent=2))
-    path = os.pathsep.join([os.path.dirname(node), _job_path(environment)])
-    npm = shutil.which("npm", path=path)
-    if npm is None:
-        raise Stop(
-            f"npm wasn't found beside the project's Node.js, {node}, or on the job's "
-            "PATH, so the TypeScript runtime can't be installed."
-        )
+    # npm's user and global configuration files, each empty, and each its own file,
+    # since npm refuses to read one file as both.
+    config = home / "npm-config"
+    config.mkdir(exist_ok=True)
+    for name in ("user", "global"):
+        (config / name).write_text("")
     npm_environment = {
         name: value
         for name, value in environment.items()
-        if name not in TOKEN_VARIABLES
+        if name not in TOKEN_VARIABLES and not name.lower().startswith("npm_config_")
     }
     npm_environment |= {
-        "PATH": path,
+        "PATH": node.path,
+        "npm_config_userconfig": str(config / "user"),
+        "npm_config_globalconfig": str(config / "global"),
         "npm_config_cache": str(home / "npm"),
         "npm_config_update_notifier": "false",
     }
     command = [
-        npm,
+        node.npm,
         "ci",
         "--prefix",
         str(tools),
+        "--registry",
+        NPM_REGISTRY,
+        "--replace-registry-host",
+        "never",
         "--ignore-scripts",
         "--no-audit",
         "--no-fund",
@@ -653,7 +708,10 @@ def unpack(package: Path, into: Path) -> None:
                 if not name.startswith("package/"):
                     raise Stop(f"{package.name} holds {member.name}, outside package/.")
                 if not (member.isfile() or member.isdir()):
-                    raise Stop(f"{package.name} holds {member.name}, which is a link.")
+                    raise Stop(
+                        f"{package.name} holds {member.name}, which isn't a file or "
+                        "a directory."
+                    )
                 member.name = name.removeprefix("package/")
                 if member.name:
                     members.append(member)
