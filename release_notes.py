@@ -5,7 +5,8 @@ D56). The release workflow runs it on a push to `main`:
 - `release_notes.py version` prints the version `release/invarith.json` names, or
   nothing if there's no `release/`, and fails if it isn't `X.Y.Z`;
 - `release_notes.py notes` prints the release's notes: invarith's packages with their
-  SHA-256s, and the third-party packages pinned for the CLI and the runtime.
+  SHA-256s, and the third-party packages pinned for the CLI and the runtimes, the
+  TypeScript runtime's from its npm lockfile, if the release holds it.
 """
 
 import json
@@ -48,7 +49,8 @@ def notes(directory: Path | None = None) -> str:
     at = version(directory)
     if at is None:
         raise NotARelease("There's no release/invarith.json.")
-    packages = json.loads((directory / "invarith.json").read_text())["packages"]
+    named = json.loads((directory / "invarith.json").read_text())
+    packages = named["packages"] | named.get("typescript_runtime", {})
     lines = [
         f"invarith/action v{at} runs invarith {at}: it downloads invarith's "
         "packages below, checks each against its SHA-256, and installs them with "
@@ -73,7 +75,37 @@ def notes(directory: Path | None = None) -> str:
             "|---|---|",
             *(f"| `{package}` | `{at_version}` |" for package, at_version in pinned),
         ]
+    lock = directory / "typescript-runtime-lock.json"
+    if lock.exists():
+        lines += [
+            "",
+            "## Pinned for the TypeScript runtime",
+            "",
+            "npm installs each one on the platforms it's for.",
+            "",
+            "| Package | Version | Platforms |",
+            "|---|---|---|",
+            *(f"| `{n}` | `{v}` | {where} |" for n, v, where in _locked(lock)),
+        ]
     return "\n".join(lines) + "\n"
+
+
+def _locked(lock: Path) -> list[tuple[str, str, str]]:
+    """Each npm package the lockfile pins: its name, its version, and the platforms
+    it's for."""
+    packages = cast(
+        dict[str, dict[str, object]], json.loads(lock.read_text())["packages"]
+    )
+    found: list[tuple[str, str, str]] = []
+    for path, entry in packages.items():
+        if not path:
+            continue  # the root package, which names the runtime's dependencies
+        name = path.rsplit("node_modules/", 1)[-1]
+        systems = cast(list[str], entry.get("os", []))
+        processors = cast(list[str], entry.get("cpu", []))
+        where = " ".join([*systems, *processors]) or "all"
+        found.append((name, str(entry["version"]), where))
+    return sorted(found)
 
 
 def main(argv: list[str]) -> int:

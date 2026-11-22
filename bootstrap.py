@@ -13,26 +13,42 @@ uv runs it on a Python it provides, with Python's standard library only. In orde
 2. **The release** this action release names, from `release/`: `invarith.json`, the
    invarith release's version and each package's SHA-256, and `cli.txt` and
    `runtime.txt`, the third-party packages the tools need, pinned with their hashes.
-3. **The job's OIDC token,** for invarith's audience, and with it, the Run API's
+   A release that holds the TypeScript runtime also lists its npm package in
+   `invarith.json`, under `typescript_runtime`, and pins its third-party packages in
+   `typescript-runtime-lock.json`, an npm lockfile (invarith's decision D82).
+3. **The inputs:** the server, the run's time, the project, and its interpreter and
+   Node.js. The project is a TypeScript project if it has a `package.json` and the
+   release holds the TypeScript runtime (D84). A TypeScript project needs its
+   Node.js, and needs no interpreter if the `python` input is its default and isn't
+   found.
+4. **The job's OIDC token,** for invarith's audience, and with it, the Run API's
    short-lived links to the release's packages (`GET /v1/releases/{version}`).
-4. **The packages,** each downloaded and checked against the SHA-256 the release
+5. **The packages,** each downloaded and checked against the SHA-256 the release
    lists. One the Run API doesn't offer, or lists with another SHA-256, stops here.
-5. **The installs,** under `$RUNNER_TEMP/invarith`, never into the project's
+6. **The installs,** under `$RUNNER_TEMP/invarith`, never into the project's
    environment:
-   - the CLI, the verifier, the core and the Python adapter in a virtual environment
-     of their own, on the Python the CLI needs;
+   - the CLI, the verifier, the core and the adapters in a virtual environment of
+     their own, on the Python the CLI needs;
    - the Python harness runtime and its pinned packages in a directory of their own,
-     for the project's interpreter, which `invarith check --tools` names.
+     for the project's interpreter, which `invarith check --tools` names;
+   - for a TypeScript project, the TypeScript runtime's pinned packages in a
+     directory of their own, installed by the npm beside the project's Node.js from
+     the release's lockfile, with `npm ci --ignore-scripts`, and the runtime's
+     package unpacked beside them, in `node_modules/@invarith/runtime`, which
+     `invarith check --typescript-tools` names.
 
    The third-party packages are installed from the release's lists with
-   `--require-hashes`, and invarith's wheels with `--no-deps`, so nothing is
-   resolved from a package index.
-6. **`invarith check`,** with the project, its interpreter, the runtime's directory
-   and the run's time, on the job's own PATH, which bootstrap.sh keeps, since uv puts
-   its own Python first on the PATH of what it runs. Its exit code is the step's.
+   `--require-hashes`, or from its lockfile, which pins each npm package with its
+   integrity, and invarith's wheels with `--no-deps`, so nothing is resolved from a
+   package index.
+7. **`invarith check`,** with the project, its interpreter and Node.js, the runtimes'
+   directories and the run's time, on the job's own PATH, which bootstrap.sh keeps,
+   since uv puts its own Python first on the PATH of what it runs. Its exit code is
+   the step's.
 
 bootstrap.sh finds the project's interpreter on the job's PATH, for the same reason,
-and gives its absolute path.
+and gives its absolute path, or leaves the input as it is if there's none, for this
+script to say so.
 
 A token, and a download link, is never printed. It exits with 2 when the tools can't
 be had, with why.
@@ -44,6 +60,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tarfile
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -68,6 +85,21 @@ RELEASE = "invarith.json"
 CLI_REQUIREMENTS = "cli.txt"
 RUNTIME_REQUIREMENTS = "runtime.txt"
 RUNTIME_WHEEL = "invarith_runtime-"
+TYPESCRIPT_LOCK = "typescript-runtime-lock.json"
+TYPESCRIPT_PACKAGE = "invarith-typescript-runtime-"
+
+# The `python` and `node` inputs' defaults, as action.yml gives them.
+DEFAULT_PYTHON = "python"
+DEFAULT_NODE = "node"
+
+# What makes a project a TypeScript project, in its directory (invarith's D84).
+PACKAGE_JSON = "package.json"
+
+# The registry the TypeScript runtime's lockfile pins its packages from.
+NPM_REGISTRY = "https://registry.npmjs.org/"
+
+# The job's means of asking for OIDC tokens, which npm isn't given.
+TOKEN_VARIABLES = ("ACTIONS_ID_TOKEN_REQUEST_URL", "ACTIONS_ID_TOKEN_REQUEST_TOKEN")
 
 
 class Stop(Exception):
@@ -96,20 +128,29 @@ type Run = Callable[[Sequence[str], Mapping[str, str] | None], int]
 @dataclass(frozen=True)
 class Release:
     """What this action release names: the invarith release's version, each
-    package's name and SHA-256, and the pinned third-party packages' lists."""
+    package's name and SHA-256, and the pinned third-party packages' lists; and, if
+    it holds the TypeScript runtime, its npm package, with its SHA-256, and the
+    lockfile that pins its third-party packages."""
 
     version: str
     packages: dict[str, str]
     cli_requirements: Path
     runtime_requirements: Path
+    typescript: tuple[str, str] | None = None
+    typescript_lock: Path | None = None
 
 
 @dataclass(frozen=True)
 class Inputs:
+    """The action's inputs. `python` is the project's interpreter, or None if it
+    wasn't found; `python_given` and `node` are the inputs as given."""
+
     server: str
     minutes: str
     project: Path
-    python: str
+    python: str | None
+    python_given: str
+    node: str
 
 
 def fetch(url: str, headers: Mapping[str, str]) -> Answer:
@@ -153,33 +194,54 @@ def bootstrap(
     action = Path(_required(environment, "GITHUB_ACTION_PATH"))
     release = read_release(action / "release")
     inputs = read_inputs(environment)
+    typescript = release.typescript is not None and typescript_project(inputs.project)
+    node = project_node(inputs.node, environment) if typescript else None
+    python = project_python(inputs, typescript, out)
     home = Path(_required(environment, "RUNNER_TEMP")) / "invarith"
     home.mkdir(parents=True, exist_ok=True)
     token = job_token(environment, send)
-    links = release_links(inputs.server, release, token, send)
-    wheels = download(release, links, home / "packages", send)
+    wanted = files(release, typescript)
+    links = release_links(inputs.server, release.version, wanted, token, send)
+    downloaded = download(wanted, links, home / "packages", send)
     uv = environment.get("UV") or shutil.which("uv") or "uv"
-    tools = install(uv, release, wheels, home, inputs.python, execute)
+    install(uv, release, downloaded, home, execute)
+    tools = None
+    if python is not None:
+        # A TypeScript project needs no Python, so an interpreter left at the
+        # default that can't take the runtime, such as one too old, isn't fatal.
+        optional = typescript and inputs.python_given == DEFAULT_PYTHON
+        tools = install_python(uv, release, downloaded, home, python, execute)
+        if tools is None and not optional:
+            raise Stop("uv couldn't install the Python runtime; its message is above.")
+        if tools is None:
+            print(
+                f"::notice title=invarith::invarith's Python runtime couldn't be "
+                f"installed for {python}, so invarith checks this TypeScript project "
+                "without it, and can't check a claim bound in Python. To check one, "
+                "set the python input to the project's interpreter.",
+                file=out,
+            )
+    command = [
+        str(home / "cli" / "bin" / "invarith"),
+        "--server",
+        inputs.server,
+        "check",
+        "--project",
+        str(inputs.project),
+    ]
+    if python is not None and tools is not None:
+        command += ["--python", python, "--tools", str(tools)]
+    if node is not None and release.typescript is not None:
+        package = downloaded[release.typescript[0]]
+        typescript_tools = install_typescript(
+            release, package, home, node, environment, execute
+        )
+        command += ["--node", node.node, "--typescript-tools", str(typescript_tools)]
+    command += ["--minutes", inputs.minutes]
     print(f"invarith {release.version} is installed; checking.", file=out)
     job = dict(environment)
-    job["PATH"] = environment.get("INVARITH_JOB_PATH") or environment.get("PATH", "")
-    return execute(
-        [
-            str(home / "cli" / "bin" / "invarith"),
-            "--server",
-            inputs.server,
-            "check",
-            "--project",
-            str(inputs.project),
-            "--python",
-            inputs.python,
-            "--tools",
-            str(tools),
-            "--minutes",
-            inputs.minutes,
-        ],
-        job,
-    )
+    job["PATH"] = _job_path(environment)
+    return execute(command, job)
 
 
 def from_this_repository(environment: Mapping[str, str], out: TextIO) -> bool:
@@ -239,11 +301,36 @@ def read_release(directory: Path) -> Release:
     for requirements in (CLI_REQUIREMENTS, RUNTIME_REQUIREMENTS):
         if not (directory / requirements).is_file():
             raise Stop(f"release/{requirements} is missing.")
+    typescript: tuple[str, str] | None = None
+    lock: Path | None = None
+    if "typescript_runtime" in found:
+        typescript = _typescript_package(found["typescript_runtime"])
+        lock = directory / TYPESCRIPT_LOCK
+        if not lock.is_file():
+            raise Stop(f"release/{TYPESCRIPT_LOCK} is missing.")
+        _package_json(lock.read_text())
     return Release(
         version=version,
         packages=packages,
         cli_requirements=directory / CLI_REQUIREMENTS,
         runtime_requirements=directory / RUNTIME_REQUIREMENTS,
+        typescript=typescript,
+        typescript_lock=lock,
+    )
+
+
+def _typescript_package(listed: object) -> tuple[str, str]:
+    """The TypeScript runtime's npm package, and its SHA-256, as `invarith.json` lists
+    it under `typescript_runtime`."""
+    entries = list(_fields(listed).items())
+    if len(entries) == 1:
+        name, sha = entries[0]
+        named = name.startswith(TYPESCRIPT_PACKAGE) and name.endswith(".tgz")
+        if named and "/" not in name and isinstance(sha, str) and len(sha) == 64:
+            return name, sha
+    raise Stop(
+        f"release/{RELEASE} needs the TypeScript runtime's npm package, and its "
+        "SHA-256, under typescript_runtime."
     )
 
 
@@ -261,16 +348,78 @@ def read_inputs(environment: Mapping[str, str]) -> Inputs:
             raise ValueError
     except ValueError:
         raise Stop("The minutes input must be a number of minutes above 0.") from None
-    given = environment.get("INVARITH_PYTHON", "python")
-    path = environment.get("INVARITH_JOB_PATH") or environment.get("PATH")
-    python = given if os.path.isabs(given) else shutil.which(given, path=path)
-    if python is None or not os.access(python, os.X_OK) or os.path.isdir(python):
-        raise Stop(
-            f"The project's interpreter, {given}, wasn't found. Set the python input "
-            "to the interpreter the project's dependencies are installed for."
-        )
+    given = environment.get("INVARITH_PYTHON") or DEFAULT_PYTHON
     project = Path(environment.get("INVARITH_PROJECT", ".")).resolve()
-    return Inputs(server=server, minutes=minutes, project=project, python=python)
+    return Inputs(
+        server=server,
+        minutes=minutes,
+        project=project,
+        python=_executable(given, _job_path(environment)),
+        python_given=given,
+        node=environment.get("INVARITH_NODE") or DEFAULT_NODE,
+    )
+
+
+def typescript_project(project: Path) -> bool:
+    """Whether the project is a TypeScript project, to invarith: one with a
+    `package.json` in its directory (invarith's D84)."""
+    return (project / PACKAGE_JSON).is_file()
+
+
+def project_python(inputs: Inputs, typescript: bool, out: TextIO) -> str | None:
+    """The project's interpreter. A TypeScript project needs none if the python input
+    is its default and isn't found: Python's runtime isn't installed, and a notice
+    says so."""
+    if inputs.python is not None:
+        return inputs.python
+    if typescript and inputs.python_given == DEFAULT_PYTHON:
+        print(
+            "::notice title=invarith::No python was found, so invarith checks this "
+            "TypeScript project without its Python runtime, and can't check a claim "
+            "bound in Python. To check one, set the python input to the project's "
+            "interpreter.",
+            file=out,
+        )
+        return None
+    raise Stop(
+        f"The project's interpreter, {inputs.python_given}, wasn't found. Set the "
+        "python input to the interpreter the project's dependencies are installed "
+        "for."
+    )
+
+
+@dataclass(frozen=True)
+class Node:
+    """The project's Node.js, and the npm that installs the TypeScript runtime for
+    it, with `path`, the PATH npm runs with: the Node.js's directory, then the
+    job's."""
+
+    node: str
+    npm: str
+    path: str
+
+
+def project_node(given: str, environment: Mapping[str, str]) -> Node:
+    """The project's Node.js, for a TypeScript project: the node input, found on the
+    job's PATH if it's a name, and made absolute if it's a path; and npm, beside it
+    or on the job's PATH."""
+    node = _executable(given, _job_path(environment))
+    if node is None:
+        raise Stop(
+            f"The project has a {PACKAGE_JSON}, so invarith checks it with its "
+            f"TypeScript runtime, on the project's Node.js, but {given} wasn't found. "
+            "Set up Node.js before the invarith step, such as with "
+            "actions/setup-node, or set the node input to the project's Node.js."
+        )
+    path = os.pathsep.join([os.path.dirname(node), _job_path(environment)])
+    npm = shutil.which("npm", path=path)
+    if npm is None:
+        raise Stop(
+            f"npm wasn't found beside the project's Node.js, {node}, or on the job's "
+            "PATH, so the TypeScript runtime can't be installed. Set up Node.js with "
+            "its npm, such as with actions/setup-node."
+        )
+    return Node(node=node, npm=npm, path=path)
 
 
 def job_token(environment: Mapping[str, str], send: Fetch) -> str:
@@ -293,12 +442,22 @@ def job_token(environment: Mapping[str, str], send: Fetch) -> str:
     return value
 
 
+def files(release: Release, typescript: bool) -> dict[str, str]:
+    """The release's files to download, each with its SHA-256: its wheels, and, for a
+    TypeScript project, the TypeScript runtime's npm package."""
+    wanted = dict(release.packages)
+    if typescript and release.typescript is not None:
+        name, sha = release.typescript
+        wanted[name] = sha
+    return wanted
+
+
 def release_links(
-    server: str, release: Release, token: str, send: Fetch
+    server: str, version: str, wanted: Mapping[str, str], token: str, send: Fetch
 ) -> dict[str, str]:
-    """Each of the release's packages' download link, from the Run API."""
+    """Each wanted file's download link, from the Run API."""
     answer = send(
-        f"{server}/v1/releases/{urllib.parse.quote(release.version, safe='')}",
+        f"{server}/v1/releases/{urllib.parse.quote(version, safe='')}",
         {"Authorization": f"Bearer {token}", "Accept": "application/json"},
     )
     body = answer.json()
@@ -306,8 +465,7 @@ def release_links(
         message = body.get("message")
         said = f": {message}" if isinstance(message, str) and message else ""
         raise Stop(
-            f"invarith's server answered {answer.status} for release "
-            f"{release.version}{said}"
+            f"invarith's server answered {answer.status} for release {version}{said}"
         )
     offered: dict[str, tuple[str, str]] = {}
     for item in body.get("files", []):
@@ -316,7 +474,7 @@ def release_links(
         if isinstance(name, str) and isinstance(sha, str) and isinstance(url, str):
             offered[name] = (sha, url)
     links: dict[str, str] = {}
-    for name, sha in release.packages.items():
+    for name, sha in wanted.items():
         if name not in offered:
             raise Stop(f"invarith's server doesn't offer {name}.")
         if offered[name][0] != sha:
@@ -329,12 +487,12 @@ def release_links(
 
 
 def download(
-    release: Release, links: Mapping[str, str], directory: Path, send: Fetch
-) -> list[Path]:
-    """Each package, downloaded and checked against its SHA-256."""
+    wanted: Mapping[str, str], links: Mapping[str, str], directory: Path, send: Fetch
+) -> dict[str, Path]:
+    """Each wanted file, downloaded and checked against its SHA-256, by name."""
     directory.mkdir(parents=True, exist_ok=True)
-    found: list[Path] = []
-    for name, sha in sorted(release.packages.items()):
+    found: dict[str, Path] = {}
+    for name, sha in sorted(wanted.items()):
         answer = send(links[name], {})
         if answer.status != 200:
             raise Stop(f"{name}'s download answered {answer.status}.")
@@ -342,22 +500,21 @@ def download(
             raise Stop(f"{name} doesn't match its SHA-256.")
         path = directory / Path(name).name
         path.write_bytes(answer.body)
-        found.append(path)
+        found[name] = path
     return found
 
 
 def install(
     uv: str,
     release: Release,
-    wheels: Sequence[Path],
+    downloaded: Mapping[str, Path],
     home: Path,
-    python: str,
     execute: Run,
-) -> Path:
-    """Install the tools, and give the runtime's directory."""
+) -> None:
+    """Install the CLI, the verifier, the core and the adapters, in a virtual
+    environment of their own."""
     environment = home / "cli"
-    tools = home / "tools"
-    runtime = [w for w in wheels if w.name.startswith(RUNTIME_WHEEL)]
+    wheels = [downloaded[name] for name in sorted(release.packages)]
     others = [str(w) for w in wheels if not w.name.startswith(RUNTIME_WHEEL)]
     cli_python = str(environment / "bin" / "python")
     steps: list[tuple[str, list[str]]] = [
@@ -392,42 +549,193 @@ def install(
                 *others,
             ],
         ),
-        (
-            "the runtime's pinned packages",
-            [
-                uv,
-                "pip",
-                "install",
-                "--no-config",
-                "--python",
-                python,
-                "--target",
-                str(tools),
-                "--require-hashes",
-                "-r",
-                str(release.runtime_requirements),
-            ],
-        ),
-        (
-            "the runtime",
-            [
-                uv,
-                "pip",
-                "install",
-                "--no-config",
-                "--python",
-                python,
-                "--target",
-                str(tools),
-                "--no-deps",
-                str(runtime[0]),
-            ],
-        ),
     ]
     for what, command in steps:
         if execute(command, None) != 0:
             raise Stop(f"uv couldn't install {what}; its message is above.")
+
+
+def install_python(
+    uv: str,
+    release: Release,
+    downloaded: Mapping[str, Path],
+    home: Path,
+    python: str,
+    execute: Run,
+) -> Path | None:
+    """Install the Python runtime and its pinned packages, for the project's
+    interpreter, and give their directory, or None if uv couldn't, whose message
+    says why."""
+    tools = home / "tools"
+    runtime = next(
+        downloaded[name] for name in release.packages if name.startswith(RUNTIME_WHEEL)
+    )
+    commands = [
+        [
+            uv,
+            "pip",
+            "install",
+            "--no-config",
+            "--python",
+            python,
+            "--target",
+            str(tools),
+            "--require-hashes",
+            "-r",
+            str(release.runtime_requirements),
+        ],
+        [
+            uv,
+            "pip",
+            "install",
+            "--no-config",
+            "--python",
+            python,
+            "--target",
+            str(tools),
+            "--no-deps",
+            str(runtime),
+        ],
+    ]
+    for command in commands:
+        if execute(command, None) != 0:
+            return None
     return tools
+
+
+def install_typescript(
+    release: Release,
+    package: Path,
+    home: Path,
+    node: Node,
+    environment: Mapping[str, str],
+    execute: Run,
+) -> Path:
+    """Install the TypeScript runtime, for the project's Node.js, and give its
+    directory (invarith's D82 and D84): its pinned packages by the npm beside the
+    project's Node.js, from the release's lockfile, with `npm ci`, which installs
+    exactly those, checks each one's integrity, and, with `--ignore-scripts`, runs
+    none of their code; then the runtime's package, unpacked beside them, where `npm
+    install` puts a package, once `npm ci` has run, since it empties `node_modules`
+    first.
+
+    npm reads none of the job's npm configuration, from its files or its
+    environment, such as the registry a workflow's `actions/setup-node` names for
+    the project's own packages, which would replace the npm registry in the
+    lockfile's URLs, or packages it omits, such as esbuild's binary, an optional
+    one. It installs from the npm registry, as the lockfile pins, through the
+    job's proxy, if it has one."""
+    assert release.typescript_lock is not None
+    tools = home / "typescript"
+    tools.mkdir(parents=True, exist_ok=True)
+    locked = release.typescript_lock.read_text()
+    (tools / "package-lock.json").write_text(locked)
+    (tools / PACKAGE_JSON).write_text(json.dumps(_package_json(locked), indent=2))
+    # npm's user and global configuration files, each empty, and each its own file,
+    # since npm refuses to read one file as both.
+    config = home / "npm-config"
+    config.mkdir(exist_ok=True)
+    for name in ("user", "global"):
+        (config / name).write_text("")
+    npm_environment = {
+        name: value
+        for name, value in environment.items()
+        if name not in TOKEN_VARIABLES and not name.lower().startswith("npm_config_")
+    }
+    npm_environment |= {
+        "PATH": node.path,
+        "npm_config_userconfig": str(config / "user"),
+        "npm_config_globalconfig": str(config / "global"),
+        "npm_config_cache": str(home / "npm"),
+        "npm_config_update_notifier": "false",
+    }
+    command = [
+        node.npm,
+        "ci",
+        "--prefix",
+        str(tools),
+        "--registry",
+        NPM_REGISTRY,
+        "--replace-registry-host",
+        "never",
+        "--ignore-scripts",
+        "--no-audit",
+        "--no-fund",
+    ]
+    if execute(command, npm_environment) != 0:
+        raise Stop(
+            "npm couldn't install the TypeScript runtime's pinned packages; its "
+            "message is above."
+        )
+    unpack(package, tools / "node_modules" / "@invarith" / "runtime")
+    return tools
+
+
+def _package_json(locked: str) -> dict[str, Any]:
+    """The `package.json` the lockfile's root package implies: its name and its
+    dependencies, which `npm ci` checks the lockfile against."""
+    try:
+        root = _fields(_fields(json.loads(locked).get("packages")).get(""))
+    except ValueError, AttributeError:
+        root = {}
+    dependencies = _fields(root.get("dependencies"))
+    if not dependencies or not all(
+        isinstance(version, str) for version in dependencies.values()
+    ):
+        raise Stop(
+            f"release/{TYPESCRIPT_LOCK} isn't an npm lockfile whose root package "
+            "names its dependencies."
+        )
+    return {
+        "name": root.get("name") or "invarith-typescript-runtime-dependencies",
+        "private": True,
+        "dependencies": dependencies,
+    }
+
+
+def unpack(package: Path, into: Path) -> None:
+    """The npm package's files and directories, which `npm pack` puts under
+    `package/`, extracted into `into`, without that prefix. Anything else in it, such
+    as a link, stops here."""
+    into.mkdir(parents=True, exist_ok=True)
+    try:
+        with tarfile.open(package, "r:gz") as archive:
+            members: list[tarfile.TarInfo] = []
+            for member in archive.getmembers():
+                name = member.name.removeprefix("./")
+                if name in ("package", "package/") and member.isdir():
+                    continue
+                if not name.startswith("package/"):
+                    raise Stop(f"{package.name} holds {member.name}, outside package/.")
+                if not (member.isfile() or member.isdir()):
+                    raise Stop(
+                        f"{package.name} holds {member.name}, which isn't a file or "
+                        "a directory."
+                    )
+                member.name = name.removeprefix("package/")
+                if member.name:
+                    members.append(member)
+            archive.extractall(into, members=members, filter="data")
+    except (tarfile.TarError, OSError) as error:
+        raise Stop(f"{package.name} couldn't be unpacked: {error}") from None
+
+
+def _job_path(environment: Mapping[str, str]) -> str:
+    """The job's own PATH, which bootstrap.sh keeps, since uv puts its own Python
+    first on the PATH of what it runs."""
+    return environment.get("INVARITH_JOB_PATH") or environment.get("PATH", "")
+
+
+def _executable(given: str, path: str) -> str | None:
+    """An executable the job names: a name, found on `path`, or a path, made absolute
+    without following links, since a virtual environment's interpreter is one."""
+    if os.sep in given:
+        found: str | None = os.path.abspath(given)
+    else:
+        found = shutil.which(given, path=path)
+    if found is None or not os.access(found, os.X_OK) or os.path.isdir(found):
+        return None
+    return found
 
 
 def _event(environment: Mapping[str, str]) -> dict[str, Any]:

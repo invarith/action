@@ -1,9 +1,11 @@
 """bootstrap.py: which events it verifies, the release it names, the job's token, the
-Run API's links, the downloads and their checks, the installs and `invarith check`.
+Run API's links, the downloads and their checks, the installs and `invarith check`,
+for a Python project and a TypeScript one.
 
 Most tests stand in for the network and for the commands it runs. The last ones run
-it for real, with uv, against a stand-in for the Run API on this machine that serves
-small wheels built here, so they need no package index."""
+it for real, with uv, and with npm for a TypeScript project, against a stand-in for
+the Run API on this machine that serves small wheels and npm packages built here, so
+they need no package index."""
 
 import base64
 import hashlib
@@ -11,10 +13,13 @@ import io
 import json
 import os
 import shutil
+import subprocess
 import sys
+import tarfile
 import threading
 import zipfile
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Generator, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -82,8 +87,28 @@ def main():
 """
 
 
+def npm_package(path: Path, files: Mapping[str, str]) -> Path:
+    """An npm package, as `npm pack` packs one: its files under `package/`."""
+    with tarfile.open(path, "w:gz") as archive:
+        for name, content in files.items():
+            data = content.encode()
+            info = tarfile.TarInfo(f"package/{name}")
+            info.size = len(data)
+            info.mode = 0o644
+            archive.addfile(info, io.BytesIO(data))
+    return path
+
+
 def sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def integrity(path: Path) -> str:
+    """An npm lockfile's integrity for a package."""
+    return (
+        "sha512-"
+        + base64.b64encode(hashlib.sha512(path.read_bytes()).digest()).decode()
+    )
 
 
 def pinned(wheel_path: Path) -> str:
@@ -97,10 +122,17 @@ def pinned(wheel_path: Path) -> str:
 
 @dataclass
 class Release:
-    """An action release, with the packages it names, built here."""
+    """An action release, with the packages it names, built here: its wheels, and the
+    TypeScript runtime's npm package, if it holds one."""
 
     action: Path
     packages: dict[str, Path]
+    typescript: dict[str, Path] = field(default_factory=dict[str, Path])
+
+    @property
+    def offered(self) -> dict[str, Path]:
+        """What the Run API offers of the release."""
+        return self.packages | self.typescript
 
 
 def release(tmp_path: Path) -> Release:
@@ -140,6 +172,92 @@ def release(tmp_path: Path) -> Release:
     return Release(action, packages)
 
 
+TYPESCRIPT_RUNTIME = f"invarith-typescript-runtime-{VERSION}.tgz"
+
+# The pinned npm package's install script, which writes a file if it runs.
+INSTALL_SCRIPT = "node -e \"require('fs').writeFileSync('install-script-ran', '')\""
+
+
+def with_typescript(given: Release, tmp_path: Path) -> Release:
+    """The release, holding the TypeScript runtime: its npm package, built here, under
+    `typescript_runtime`, and `typescript-runtime-lock.json`, which pins one npm
+    package, a tarball on this machine, with an install script."""
+    built = tmp_path / "built"
+    runtime = npm_package(
+        built / TYPESCRIPT_RUNTIME,
+        {
+            "package.json": json.dumps(
+                {
+                    "name": "@invarith/runtime",
+                    "version": VERSION,
+                    "type": "module",
+                    "exports": {".": "./dist/index.js"},
+                    "dependencies": {"pinned-npm-dep": "1.0.0"},
+                }
+            ),
+            "dist/index.js": f'export const VERSION = "{VERSION}";\n',
+        },
+    )
+    dependency = npm_package(
+        built / "pinned-npm-dep-1.0.0.tgz",
+        {
+            "package.json": json.dumps(
+                {
+                    "name": "pinned-npm-dep",
+                    "version": "1.0.0",
+                    "type": "module",
+                    "main": "index.js",
+                    "scripts": {"install": INSTALL_SCRIPT},
+                }
+            ),
+            "index.js": "export const VALUE = 1;\n",
+        },
+    )
+    directory = given.action / "release"
+    named = json.loads((directory / "invarith.json").read_text())
+    named["typescript_runtime"] = {TYPESCRIPT_RUNTIME: sha256(runtime)}
+    (directory / "invarith.json").write_text(json.dumps(named))
+    root = {"pinned-npm-dep": "1.0.0"}
+    lock = {
+        "name": "invarith-typescript-runtime-dependencies",
+        "lockfileVersion": 3,
+        "requires": True,
+        "packages": {
+            "": {
+                "name": "invarith-typescript-runtime-dependencies",
+                "dependencies": root,
+            },
+            "node_modules/pinned-npm-dep": {
+                "version": "1.0.0",
+                "resolved": f"file:{dependency.resolve()}",
+                "integrity": integrity(dependency),
+                "hasInstallScript": True,
+            },
+        },
+    }
+    (directory / "typescript-runtime-lock.json").write_text(json.dumps(lock, indent=2))
+    return Release(given.action, given.packages, {TYPESCRIPT_RUNTIME: runtime})
+
+
+def typescript_project(tmp_path: Path) -> Path:
+    """A TypeScript project: one with a package.json."""
+    project = tmp_path / "shop"
+    project.mkdir()
+    (project / "package.json").write_text('{"type": "module"}\n')
+    return project
+
+
+def job_bin(tmp_path: Path, *names: str) -> Path:
+    """A directory on the job's PATH, holding executables with these names."""
+    directory = tmp_path / "job-bin"
+    directory.mkdir(parents=True, exist_ok=True)
+    for name in names:
+        executable = directory / name
+        executable.write_text("#!/bin/sh\n")
+        executable.chmod(0o755)
+    return directory
+
+
 # The network, stood in for
 
 
@@ -168,7 +286,7 @@ class Network:
                     "size": path.stat().st_size,
                     "url": f"https://storage.example/{name}?signature=secret",
                 }
-                for name, path in self.release.packages.items()
+                for name, path in self.release.offered.items()
             ]
             return Answer(
                 200, json.dumps({"version": VERSION, "files": files}).encode()
@@ -176,7 +294,7 @@ class Network:
         prefix = "https://storage.example/"
         if url.startswith(prefix):
             name = url.removeprefix(prefix).split("?")[0]
-            return Answer(200, self.release.packages[name].read_bytes())
+            return Answer(200, self.release.offered[name].read_bytes())
         return Answer(404, b"{}")
 
 
@@ -608,6 +726,378 @@ def test_the_check_s_exit_code_is_the_step_s(tmp_path: Path, given: Release) -> 
     assert code == 1
 
 
+# A TypeScript project
+
+
+def typescript_job(tmp_path: Path, given: Release, **changes: str) -> dict[str, str]:
+    """A push's job for a TypeScript project, with Node.js and npm on its PATH."""
+    found = environment(
+        tmp_path,
+        given,
+        INVARITH_PROJECT=str(typescript_project(tmp_path)),
+        INVARITH_JOB_PATH=str(job_bin(tmp_path, "node", "npm")),
+    )
+    found.update(changes)
+    return found
+
+
+def test_a_typescript_project(tmp_path: Path, given: Release) -> None:
+    """For a project with a package.json, the TypeScript runtime's npm package is
+    downloaded and checked with the wheels; its pinned packages are installed by the
+    npm beside the project's Node.js, from the release's lockfile, from the npm
+    registry, with install scripts off, npm's cache beside them, and without the
+    job's means of asking for OIDC tokens or its npm configuration; the runtime is
+    unpacked beside them; and the check is given the Node.js and the runtime's
+    directory."""
+    given = with_typescript(given, tmp_path)
+    variables = typescript_job(
+        tmp_path,
+        given,
+        npm_config_registry="https://npm.example/",
+        NPM_CONFIG_USERCONFIG=str(tmp_path / "setup-node.npmrc"),
+    )
+    network, commands = Network(given), Commands()
+    code, said = bootstrapped(variables, network, commands)
+    assert code == 0, said
+    home = tmp_path / "runner" / "invarith"
+    tools = home / "typescript"
+    job = tmp_path / "job-bin"
+    assert f"https://storage.example/{TYPESCRIPT_RUNTIME}?signature=secret" in [
+        url for url, _ in network.calls
+    ]
+    [(npm, npm_environment)] = [
+        (command, env) for command, env in commands.run if "ci" in command
+    ]
+    assert npm == [
+        str(job / "npm"),
+        "ci",
+        "--prefix",
+        str(tools),
+        "--registry",
+        "https://registry.npmjs.org/",
+        "--replace-registry-host",
+        "never",
+        "--ignore-scripts",
+        "--no-audit",
+        "--no-fund",
+    ]
+    assert npm_environment is not None
+    assert npm_environment["PATH"] == f"{job}:{job}"
+    assert {
+        name: value
+        for name, value in npm_environment.items()
+        if name.lower().startswith("npm_config_")
+    } == {
+        "npm_config_userconfig": str(home / "npm-config" / "user"),
+        "npm_config_globalconfig": str(home / "npm-config" / "global"),
+        "npm_config_cache": str(home / "npm"),
+        "npm_config_update_notifier": "false",
+    }
+    assert (home / "npm-config" / "user").read_text() == ""
+    assert (home / "npm-config" / "global").read_text() == ""
+    assert "ACTIONS_ID_TOKEN_REQUEST_URL" not in npm_environment
+    assert "ACTIONS_ID_TOKEN_REQUEST_TOKEN" not in npm_environment
+    locked = (given.action / "release" / "typescript-runtime-lock.json").read_text()
+    assert (tools / "package-lock.json").read_text() == locked
+    assert json.loads((tools / "package.json").read_text()) == {
+        "name": "invarith-typescript-runtime-dependencies",
+        "private": True,
+        "dependencies": {"pinned-npm-dep": "1.0.0"},
+    }
+    runtime = tools / "node_modules" / "@invarith" / "runtime"
+    assert sorted(p.relative_to(runtime).as_posix() for p in runtime.rglob("*")) == [
+        "dist",
+        "dist/index.js",
+        "package.json",
+    ]
+    check, _ = commands.run[-1]
+    assert check[check.index("--python") : check.index("--minutes")] == [
+        "--python",
+        sys.executable,
+        "--tools",
+        str(home / "tools"),
+        "--node",
+        str(job / "node"),
+        "--typescript-tools",
+        str(tools),
+    ]
+
+
+def test_a_project_without_a_package_json(tmp_path: Path, given: Release) -> None:
+    """It isn't a TypeScript project: the release's TypeScript runtime isn't
+    downloaded or installed, and it needs no Node.js."""
+    given = with_typescript(given, tmp_path)
+    network, commands = Network(given), Commands()
+    code, said = bootstrapped(environment(tmp_path, given), network, commands)
+    assert code == 0, said
+    assert not any(TYPESCRIPT_RUNTIME in url for url, _ in network.calls)
+    assert not any("ci" in command for command, _ in commands.run)
+    assert "--node" not in commands.run[-1][0]
+
+
+def test_a_release_without_the_typescript_runtime(
+    tmp_path: Path, given: Release
+) -> None:
+    """A release made before TypeScript support, such as 0.7.0, installs nothing for
+    TypeScript, even for a project with a package.json, and needs no Node.js."""
+    variables = environment(
+        tmp_path, given, INVARITH_PROJECT=str(typescript_project(tmp_path))
+    )
+    commands = Commands()
+    code, said = bootstrapped(variables, Network(given), commands)
+    assert code == 0, said
+    assert "--node" not in commands.run[-1][0]
+
+
+def test_a_typescript_project_s_node_input(tmp_path: Path, given: Release) -> None:
+    """A path, made absolute, without following links: a link to Node.js stays the
+    link. npm is looked for beside the path given, then on the job's PATH."""
+    given = with_typescript(given, tmp_path)
+    elsewhere = tmp_path / "node-26" / "bin"
+    elsewhere.mkdir(parents=True)
+    for name in ("node", "npm"):
+        (elsewhere / name).write_text("#!/bin/sh\n")
+        (elsewhere / name).chmod(0o755)
+    linked = tmp_path / "node-link"
+    linked.symlink_to(elsewhere / "node")
+    variables = typescript_job(tmp_path, given, INVARITH_NODE=str(linked))
+    commands = Commands()
+    code, said = bootstrapped(variables, Network(given), commands)
+    assert code == 0, said
+    check = commands.run[-1][0]
+    assert check[check.index("--node") + 1] == str(linked)
+    [npm] = [command for command, _ in commands.run if "ci" in command]
+    assert npm[0] == str(tmp_path / "job-bin" / "npm")
+    assert npm[0] != str(elsewhere / "npm")
+
+
+def test_npm_beside_the_project_s_node(tmp_path: Path, given: Release) -> None:
+    given = with_typescript(given, tmp_path)
+    elsewhere = tmp_path / "node-26" / "bin"
+    elsewhere.mkdir(parents=True)
+    for name in ("node", "npm"):
+        (elsewhere / name).write_text("#!/bin/sh\n")
+        (elsewhere / name).chmod(0o755)
+    variables = typescript_job(tmp_path, given, INVARITH_NODE=str(elsewhere / "node"))
+    commands = Commands()
+    code, said = bootstrapped(variables, Network(given), commands)
+    assert code == 0, said
+    [(npm, npm_environment)] = [
+        (command, env) for command, env in commands.run if "ci" in command
+    ]
+    assert npm[0] == str(elsewhere / "npm")
+    assert npm_environment is not None
+    assert npm_environment["PATH"].startswith(f"{elsewhere}:")
+
+
+def test_a_typescript_project_without_node(tmp_path: Path, given: Release) -> None:
+    """It stops before asking for a token, saying how to set up Node.js."""
+    given = with_typescript(given, tmp_path)
+    variables = typescript_job(tmp_path, given, INVARITH_NODE="node-99")
+    network = Network(given)
+    code, said = bootstrapped(variables, network, Commands())
+    assert code == 2
+    assert "node-99 wasn't found" in said
+    assert "actions/setup-node" in said
+    assert network.calls == []
+
+
+def test_a_typescript_project_without_npm(tmp_path: Path, given: Release) -> None:
+    """It stops before asking for a token, as without Node.js."""
+    given = with_typescript(given, tmp_path)
+    variables = typescript_job(
+        tmp_path, given, INVARITH_JOB_PATH=str(job_bin(tmp_path / "x", "node"))
+    )
+    network = Network(given)
+    code, said = bootstrapped(variables, network, Commands())
+    assert code == 2
+    assert "npm wasn't found beside the project's Node.js" in said
+    assert network.calls == []
+
+
+def test_a_typescript_project_with_neither_node_nor_python(
+    tmp_path: Path, given: Release
+) -> None:
+    """It says only that Node.js wasn't found, not that it would check the project
+    without Python."""
+    given = with_typescript(given, tmp_path)
+    variables = typescript_job(
+        tmp_path,
+        given,
+        INVARITH_PYTHON="python",
+        INVARITH_JOB_PATH=str(job_bin(tmp_path / "x")),
+    )
+    code, said = bootstrapped(variables, Network(given), Commands())
+    assert code == 2
+    assert said.startswith("::error title=invarith::The project has a package.json")
+    assert "::notice" not in said
+
+
+def test_a_typescript_project_needs_no_python(tmp_path: Path, given: Release) -> None:
+    """With the python input at its default, and no python found, Python's runtime
+    isn't installed, a notice says so, and the check isn't given an interpreter."""
+    given = with_typescript(given, tmp_path)
+    variables = typescript_job(tmp_path, given, INVARITH_PYTHON="python")
+    commands = Commands()
+    code, said = bootstrapped(variables, Network(given), commands)
+    assert code == 0, said
+    assert said.startswith("::notice title=invarith::No python was found")
+    assert not any("--target" in command for command, _ in commands.run)
+    check = commands.run[-1][0]
+    assert "--python" not in check
+    assert "--tools" not in check
+    assert "--typescript-tools" in check
+
+
+@pytest.mark.parametrize(
+    ("project", "python"),
+    [("typescript", "python3.99"), ("python", "python")],
+    ids=["set for a TypeScript project", "the default for a Python project"],
+)
+def test_an_interpreter_the_project_needs(
+    tmp_path: Path, given: Release, project: str, python: str
+) -> None:
+    """One the workflow sets must be found, as must the default for a project that
+    isn't a TypeScript project."""
+    given = with_typescript(given, tmp_path)
+    variables = typescript_job(tmp_path, given, INVARITH_PYTHON=python)
+    if project == "python":
+        variables["INVARITH_PROJECT"] = str(tmp_path)
+    network = Network(given)
+    code, said = bootstrapped(variables, network, Commands())
+    assert code == 2
+    assert f"The project's interpreter, {python}, wasn't found" in said
+    assert network.calls == []
+
+
+def test_a_typescript_project_s_python_that_can_t_take_the_runtime(
+    tmp_path: Path, given: Release
+) -> None:
+    """With the python input at its default, a python uv can't install the runtime
+    for, such as one older than it supports, is like none found: a notice says so,
+    and the check isn't given an interpreter."""
+    given = with_typescript(given, tmp_path)
+    variables = typescript_job(
+        tmp_path,
+        given,
+        INVARITH_PYTHON="python",
+        INVARITH_JOB_PATH=str(job_bin(tmp_path, "node", "npm", "python")),
+    )
+    commands = Commands(exits={"--target": 1})
+    code, said = bootstrapped(variables, Network(given), commands)
+    assert code == 0, said
+    assert said.startswith(
+        "::notice title=invarith::invarith's Python runtime couldn't be installed for "
+        f"{tmp_path / 'job-bin' / 'python'}"
+    )
+    check = commands.run[-1][0]
+    assert "--python" not in check
+    assert "--tools" not in check
+    assert "--typescript-tools" in check
+
+
+@pytest.mark.parametrize(
+    "project", ["python", "typescript"], ids=["a Python project", "python set"]
+)
+def test_a_python_that_can_t_take_the_runtime(
+    tmp_path: Path, given: Release, project: str
+) -> None:
+    """For a project that isn't a TypeScript project, or a python the workflow sets,
+    it stops."""
+    given = with_typescript(given, tmp_path)
+    variables = typescript_job(tmp_path, given)
+    if project == "python":
+        variables["INVARITH_PROJECT"] = str(tmp_path)
+    commands = Commands(exits={"--target": 1})
+    code, said = bootstrapped(variables, Network(given), commands)
+    assert code == 2
+    assert "uv couldn't install the Python runtime" in said
+    assert not any("check" in command for command, _ in commands.run)
+
+
+def test_npm_fails(tmp_path: Path, given: Release) -> None:
+    given = with_typescript(given, tmp_path)
+    commands = Commands(exits={"ci": 1})
+    code, said = bootstrapped(typescript_job(tmp_path, given), Network(given), commands)
+    assert code == 2
+    assert "npm couldn't install the TypeScript runtime's pinned packages" in said
+    assert not any("check" in command for command, _ in commands.run)
+
+
+@pytest.mark.parametrize(
+    "broken",
+    ["two packages", "a short checksum", "another name", "no lockfile"],
+)
+def test_a_release_s_typescript_runtime_that_isn_t_whole(
+    tmp_path: Path, given: Release, broken: str
+) -> None:
+    given = with_typescript(given, tmp_path)
+    directory = given.action / "release"
+    named = json.loads((directory / "invarith.json").read_text())
+    if broken == "two packages":
+        named["typescript_runtime"]["invarith-typescript-runtime-0.5.0.tgz"] = "a" * 64
+    elif broken == "a short checksum":
+        named["typescript_runtime"][TYPESCRIPT_RUNTIME] = "abc"
+    elif broken == "another name":
+        named["typescript_runtime"] = {"left-pad-1.3.0.tgz": "a" * 64}
+    else:
+        (directory / "typescript-runtime-lock.json").unlink()
+    (directory / "invarith.json").write_text(json.dumps(named))
+    code, said = bootstrapped(environment(tmp_path, given), Network(given), Commands())
+    assert code == 2
+    assert "::error title=invarith::release/" in said
+
+
+def test_a_lockfile_without_its_root_package(tmp_path: Path, given: Release) -> None:
+    """It's found with the rest of the release, before asking for a token."""
+    given = with_typescript(given, tmp_path)
+    lock = given.action / "release" / "typescript-runtime-lock.json"
+    lock.write_text(json.dumps({"lockfileVersion": 3, "packages": {}}))
+    network = Network(given)
+    code, said = bootstrapped(typescript_job(tmp_path, given), network, Commands())
+    assert code == 2
+    assert "isn't an npm lockfile whose root package names its dependencies" in said
+    assert network.calls == []
+
+
+def _with_member(path: Path, member: tarfile.TarInfo, data: bytes = b"") -> None:
+    with tarfile.open(path, "w:gz") as archive:
+        info = tarfile.TarInfo("package/package.json")
+        info.size = 2
+        archive.addfile(info, io.BytesIO(b"{}"))
+        archive.addfile(member, io.BytesIO(data) if member.isfile() else None)
+
+
+@pytest.mark.parametrize(
+    ("member", "said"),
+    [
+        ("link", "which isn't a file or a directory"),
+        ("outside", "outside package/"),
+        ("parent", "couldn't be unpacked"),
+    ],
+)
+def test_an_npm_package_that_can_t_be_unpacked(
+    tmp_path: Path, member: str, said: str
+) -> None:
+    """Only its files and directories, under package/, and only into its
+    directory."""
+    package = tmp_path / TYPESCRIPT_RUNTIME
+    if member == "link":
+        info = tarfile.TarInfo("package/dist")
+        info.type = tarfile.SYMTYPE
+        info.linkname = "/etc"
+        _with_member(package, info)
+    else:
+        name = "dist/index.js" if member == "outside" else "package/../../escaped.js"
+        info = tarfile.TarInfo(name)
+        info.size = 1
+        _with_member(package, info, b"x")
+    into = tmp_path / "tools" / "node_modules" / "@invarith" / "runtime"
+    with pytest.raises(bootstrap.Stop, match=said):
+        bootstrap.unpack(package, into)
+    assert not list(tmp_path.rglob("escaped.js"))
+
+
 # For real: uv, and a stand-in for the Run API on this machine
 
 
@@ -630,13 +1120,13 @@ class Served(BaseHTTPRequestHandler):
                     "size": path.stat().st_size,
                     "url": f"http://127.0.0.1:{port}/files/{name}",
                 }
-                for name, path in self.release.packages.items()
+                for name, path in self.release.offered.items()
             ]
             self.answer(200, json.dumps({"version": VERSION, "files": files}).encode())
         elif self.path.startswith("/files/"):
             self.answer(
                 200,
-                self.release.packages[self.path.removeprefix("/files/")].read_bytes(),
+                self.release.offered[self.path.removeprefix("/files/")].read_bytes(),
             )
         else:
             self.answer(404, b"{}")
@@ -651,14 +1141,24 @@ class Served(BaseHTTPRequestHandler):
         pass
 
 
-@pytest.fixture
-def served(given: Release) -> Iterator[str]:
+@contextmanager
+def served_release(given: Release) -> Generator[str]:
+    """The stand-in for GitHub's token service and invarith's server, serving the
+    release, at the address it gives."""
     handler = type("Handler", (Served,), {"release": given})
     server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    yield f"http://127.0.0.1:{server.server_address[1]}"
-    server.shutdown()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}"
+    finally:
+        server.shutdown()
+
+
+@pytest.fixture
+def served(given: Release) -> Iterator[str]:
+    with served_release(given) as address:
+        yield address
 
 
 def for_real(tmp_path: Path, given: Release, address: str) -> dict[str, str]:
@@ -730,6 +1230,79 @@ def test_a_pinned_package_with_another_hash_isn_t_installed(
     code = bootstrap.main(for_real(tmp_path, given, served), out=out)
     assert code == 2
     assert "uv couldn't install the CLI's pinned packages" in out.getvalue()
+
+
+def typescript_for_real(tmp_path: Path, given: Release, address: str) -> dict[str, str]:
+    node, npm = shutil.which("node"), shutil.which("npm")
+    if node is None or npm is None:
+        pytest.skip("node and npm aren't on the PATH")
+    variables = for_real(tmp_path, given, address)
+    variables["INVARITH_PROJECT"] = str(typescript_project(tmp_path))
+    return variables
+
+
+def test_the_typescript_runtime_installed_and_checked(
+    tmp_path: Path, given: Release
+) -> None:
+    """npm installs the pinned package from the lockfile, running none of its install
+    scripts, and reading none of the job's npm configuration, the runtime is
+    unpacked beside it, where Node.js imports it from, and the check is given
+    both."""
+    given = with_typescript(given, tmp_path)
+    npmrc = tmp_path / "job.npmrc"
+    npmrc.write_text("dry-run=true\n")
+    with served_release(given) as address:
+        variables = typescript_for_real(tmp_path, given, address)
+        # The job's npm configuration, which would install nothing, isn't read.
+        variables |= {"NPM_CONFIG_USERCONFIG": str(npmrc), "npm_config_dry_run": "true"}
+        out = io.StringIO()
+        code = bootstrap.main(variables, out=out)
+    assert code == 1, out.getvalue()
+    tools = tmp_path / "runner" / "invarith" / "typescript"
+    recorded = json.loads((tmp_path / "record.json").read_text())
+    node = shutil.which("node")
+    assert recorded["argv"][-6:] == [
+        "--node",
+        node,
+        "--typescript-tools",
+        str(tools),
+        "--minutes",
+        "15",
+    ]
+    assert (tools / "node_modules" / "pinned-npm-dep" / "index.js").is_file()
+    assert not list(tools.rglob("install-script-ran"))
+    imported = subprocess.run(
+        [
+            str(node),
+            "--input-type=module",
+            "--eval",
+            'import { VERSION } from "@invarith/runtime"; console.log(VERSION);',
+        ],
+        cwd=tools,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert imported.stdout.strip() == VERSION
+
+
+def test_a_pinned_npm_package_with_another_integrity_isn_t_installed(
+    tmp_path: Path, given: Release
+) -> None:
+    given = with_typescript(given, tmp_path)
+    lock_path = given.action / "release" / "typescript-runtime-lock.json"
+    lock = json.loads(lock_path.read_text())
+    lock["packages"]["node_modules/pinned-npm-dep"]["integrity"] = (
+        "sha512-" + base64.b64encode(b"0" * 64).decode()
+    )
+    lock_path.write_text(json.dumps(lock))
+    with served_release(given) as address:
+        out = io.StringIO()
+        code = bootstrap.main(typescript_for_real(tmp_path, given, address), out=out)
+    assert code == 2
+    assert "npm couldn't install the TypeScript runtime's pinned packages" in (
+        out.getvalue()
+    )
 
 
 def test_the_audience() -> None:

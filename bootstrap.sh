@@ -49,17 +49,19 @@ tar --extract --gzip --file "$archive" --directory "$home"
 
 # The project's interpreter, found on the job's PATH now: uv puts its own Python first
 # on the PATH of what it runs. A relative path is made absolute, without following
-# links, since a virtual environment's interpreter is one.
+# links, since a virtual environment's interpreter is one. One that isn't found is
+# left as given, for bootstrap.py, since a TypeScript project needs none (invarith's
+# decision D84).
 given="${INVARITH_PYTHON:-python}"
-if ! found="$(command -v -- "$given")"; then
-  echo "::error title=invarith::The project's interpreter, $given, wasn't found. Set the python input to the interpreter the project's dependencies are installed for."
-  exit 2
+if found="$(command -v -- "$given")"; then
+  case "$found" in
+    /*) ;;
+    *) found="$PWD/$found" ;;
+  esac
+  export INVARITH_PYTHON="$found"
+else
+  export INVARITH_PYTHON="$given"
 fi
-case "$found" in
-  /*) ;;
-  *) found="$PWD/$found" ;;
-esac
-export INVARITH_PYTHON="$found"
 # The job's own PATH, which invarith check runs with.
 export INVARITH_JOB_PATH="$PATH"
 
