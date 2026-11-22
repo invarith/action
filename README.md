@@ -35,7 +35,7 @@ jobs:
 
 A project installed with pip, after `actions/setup-python`, can leave `python` at its default.
 
-A TypeScript or JavaScript project, one with a `package.json` in the project's directory, sets up Node.js and installs its packages with `npm ci` instead. It needs an action release that holds invarith's TypeScript runtime, whose release notes list `invarith-typescript-runtime-X.Y.Z.tgz` among invarith's packages; releases up to v0.7.0 don't:
+A TypeScript or JavaScript project, one with a `package.json` in the project's directory, sets up Node.js and installs its packages with `npm ci` instead, with an action release from v0.8.0 on, the first that holds invarith's TypeScript runtime:
 
 ```yaml
     steps:
@@ -47,7 +47,7 @@ A TypeScript or JavaScript project, one with a `package.json` in the project's d
           node-version: 24
           cache: npm
       - run: npm ci
-      - uses: invarith/action@vX.Y.Z # a release that holds the TypeScript runtime
+      - uses: invarith/action@v0.8.0
 ```
 
 - **When it runs:** on pull requests, and on pushes to the default branch. A push's run is what moves invarith's record of the claims forward once a change merges.
