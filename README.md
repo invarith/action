@@ -28,7 +28,7 @@ jobs:
           fetch-depth: 2
       - uses: astral-sh/setup-uv@v10
       - run: uv sync --locked
-      - uses: invarith/action@v0.6.0
+      - uses: invarith/action@v0.8.0
         with:
           python: .venv/bin/python
 ```
@@ -52,10 +52,10 @@ A TypeScript or JavaScript project, one with a `package.json` in the project's d
 
 - **When it runs:** on pull requests, and on pushes to the default branch. A push's run is what moves invarith's record of the claims forward once a change merges.
 - **After the project's dependencies are installed.** The harnesses import the project's code with its dependencies, on the interpreter the `python` input names, or, for a TypeScript project, on the Node.js the `node` input names, from the project's `node_modules`. Install them the way the project's own CI does.
-- **A TypeScript project** needs Node.js 22 or later, and npm, which the action installs invarith's TypeScript runtime with, from the npm registry, reading none of the job's npm configuration, such as a registry `actions/setup-node` names for the project's own packages. It needs no Python: if `python` is left at its default, and the runner has no `python`, or one the Python runtime can't be installed for, the action checks the project without its Python runtime, and says so.
+- **A TypeScript project** needs the Node.js that the TypeScript runtime's pinned packages need: for v0.8.0, 24.11 or later, or 22.18 or later in the 22 line, as its @babel/parser requires. It needs npm too, which the action installs invarith's TypeScript runtime with, from the npm registry, reading none of the job's npm configuration, such as a registry `actions/setup-node` names for the project's own packages. It needs no Python: if `python` is left at its default, and the runner has no `python`, or one the Python runtime can't be installed for, the action checks the project without its Python runtime, and says so.
 - **`fetch-depth: 2`.** On a pull request, the checkout is GitHub's merge commit, and invarith compares it with its first parent, the base.
 - **Permissions:** `id-token: write`, so the job can sign in to invarith with its OIDC token, and otherwise only `contents: read`. No secret is needed.
-- **Pin the action** to a full release tag, such as `invarith/action@v0.6.0`, or to a release's commit SHA. A release's tag is the version of the invarith release it runs. A commit between releases names no invarith release, and fails saying so.
+- **Pin the action** to a full release tag, such as `invarith/action@v0.8.0`, or to a release's commit SHA. A release's tag is the version of the invarith release it runs. A commit between releases names no invarith release, and fails saying so.
 - **Never run it under `pull_request_target`,** which would run a fork's code with this repository's permissions. The action refuses to.
 - **Linux runners only,** on x86_64 or arm64, GitHub-hosted or self-hosted. The runner needs `curl`, `tar` and `sha256sum`.
 
