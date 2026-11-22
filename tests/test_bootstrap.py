@@ -1,11 +1,13 @@
 """bootstrap.py: which events it verifies, the release it names, the job's token, the
 Run API's links, the downloads and their checks, the installs and `invarith check`,
-for a Python project and a TypeScript one.
+for a Python project, a TypeScript one and a Java one, built with Gradle or Maven.
 
 Most tests stand in for the network and for the commands it runs. The last ones run
-it for real, with uv, and with npm for a TypeScript project, against a stand-in for
-the Run API on this machine that serves small wheels and npm packages built here, so
-they need no package index."""
+it for real, with uv, with npm for a TypeScript project, and with the Java tools'
+jars for a Java project, against a stand-in for the Run API on this machine that
+serves small wheels, npm packages and jars built here, so they need no package
+index. The CLI they install stands in for invarith's, recording how its setup and
+its check were run, so no Java project is built."""
 
 import base64
 import hashlib
@@ -77,13 +79,24 @@ def wheel(
     return path
 
 
-# The CLI stands in for invarith's: it records how it was run, and exits as asked.
+# The CLI stands in for invarith's: it records how it was run, `invarith setup` beside
+# the rest, and exits as asked, `invarith setup` with FAKE_SETUP_EXIT, or 0.
 FAKE_CLI = """import json, os, sys
 
 def main():
-    with open(os.environ["FAKE_RECORD"], "w") as out:
-        json.dump({"argv": sys.argv[1:], "path": os.environ["PATH"]}, out)
-    return int(os.environ.get("FAKE_EXIT", "0"))
+    record, exit = os.environ["FAKE_RECORD"], "FAKE_EXIT"
+    if sys.argv[1:2] == ["setup"]:
+        record, exit = record + ".setup", "FAKE_SETUP_EXIT"
+    with open(record, "w") as out:
+        json.dump(
+            {
+                "argv": sys.argv[1:],
+                "path": os.environ["PATH"],
+                "token": "ACTIONS_ID_TOKEN_REQUEST_URL" in os.environ,
+            },
+            out,
+        )
+    return int(os.environ.get(exit, "0"))
 """
 
 
@@ -122,17 +135,19 @@ def pinned(wheel_path: Path) -> str:
 
 @dataclass
 class Release:
-    """An action release, with the packages it names, built here: its wheels, and the
-    TypeScript runtime's npm package, if it holds one."""
+    """An action release, with the packages it names, built here: its wheels, the
+    TypeScript runtime's npm package, if it holds one, and the Java tools' jars, if it
+    holds them."""
 
     action: Path
     packages: dict[str, Path]
     typescript: dict[str, Path] = field(default_factory=dict[str, Path])
+    java: dict[str, Path] = field(default_factory=dict[str, Path])
 
     @property
     def offered(self) -> dict[str, Path]:
         """What the Run API offers of the release."""
-        return self.packages | self.typescript
+        return self.packages | self.typescript | self.java
 
 
 def release(tmp_path: Path) -> Release:
@@ -236,7 +251,45 @@ def with_typescript(given: Release, tmp_path: Path) -> Release:
         },
     }
     (directory / "typescript-runtime-lock.json").write_text(json.dumps(lock, indent=2))
-    return Release(given.action, given.packages, {TYPESCRIPT_RUNTIME: runtime})
+    return Release(
+        given.action, given.packages, {TYPESCRIPT_RUNTIME: runtime}, given.java
+    )
+
+
+RUNTIME_JAR = f"invarith-runtime-{VERSION}.jar"
+MAVEN_EXTENSION_JAR = f"invarith-maven-extension-{VERSION}.jar"
+# Java's markers, as invarith's Java adapter names them: the Gradle and Maven build
+# files.
+JAVA_MARKERS = [
+    "settings.gradle",
+    "settings.gradle.kts",
+    "build.gradle",
+    "build.gradle.kts",
+    "pom.xml",
+]
+
+
+def with_java(
+    given: Release, tmp_path: Path, markers: Mapping[str, list[str]] | None = None
+) -> Release:
+    """The release, holding the Java tools: their jars, built here, under
+    `java_runtime`, and each language's markers, Java's and TypeScript's by default,
+    under `markers`."""
+    built = tmp_path / "built"
+    jars: dict[str, Path] = {}
+    for name in (RUNTIME_JAR, MAVEN_EXTENSION_JAR):
+        (built / name).write_bytes(f"the {name} jar".encode())
+        jars[name] = built / name
+    directory = given.action / "release"
+    named = json.loads((directory / "invarith.json").read_text())
+    named["java_runtime"] = {name: sha256(path) for name, path in jars.items()}
+    named["markers"] = (
+        {"java": JAVA_MARKERS, "typescript": ["package.json"]}
+        if markers is None
+        else dict(markers)
+    )
+    (directory / "invarith.json").write_text(json.dumps(named))
+    return Release(given.action, given.packages, given.typescript, jars)
 
 
 def typescript_project(tmp_path: Path) -> Path:
@@ -244,6 +297,24 @@ def typescript_project(tmp_path: Path) -> Path:
     project = tmp_path / "shop"
     project.mkdir()
     (project / "package.json").write_text('{"type": "module"}\n')
+    return project
+
+
+def java_project(tmp_path: Path, build: str) -> Path:
+    """A small Java project, built with Gradle or Maven: its build files and a class."""
+    project = tmp_path / "shop"
+    (project / "src" / "main" / "java" / "shop").mkdir(parents=True)
+    (project / "src" / "main" / "java" / "shop" / "Line.java").write_text(
+        "package shop;\n\npublic record Line(long cents) {}\n"
+    )
+    if build == "gradle":
+        (project / "settings.gradle.kts").write_text('rootProject.name = "shop"\n')
+        (project / "build.gradle.kts").write_text("plugins { java }\n")
+    else:
+        (project / "pom.xml").write_text(
+            "<project><modelVersion>4.0.0</modelVersion><groupId>shop</groupId>"
+            "<artifactId>shop</artifactId><version>1</version></project>\n"
+        )
     return project
 
 
@@ -929,7 +1000,9 @@ def test_a_typescript_project_with_neither_node_nor_python(
     )
     code, said = bootstrapped(variables, Network(given), Commands())
     assert code == 2
-    assert said.startswith("::error title=invarith::The project has a package.json")
+    assert said.startswith(
+        "::error title=invarith::The project is a TypeScript project"
+    )
     assert "::notice" not in said
 
 
@@ -1096,6 +1169,342 @@ def test_an_npm_package_that_can_t_be_unpacked(
     with pytest.raises(bootstrap.Stop, match=said):
         bootstrap.unpack(package, into)
     assert not list(tmp_path.rglob("escaped.js"))
+
+
+# A Java project
+
+
+def java_job(
+    tmp_path: Path, given: Release, build: str = "gradle", **changes: str
+) -> dict[str, str]:
+    """A push's job for a Java project, built with Gradle or Maven, with a JDK's java
+    and javac on its PATH."""
+    found = environment(
+        tmp_path,
+        given,
+        INVARITH_PROJECT=str(java_project(tmp_path, build)),
+        INVARITH_JOB_PATH=str(job_bin(tmp_path, "java", "javac")),
+    )
+    found.update(changes)
+    return found
+
+
+@pytest.mark.parametrize("build", ["gradle", "maven"])
+def test_a_java_project(tmp_path: Path, given: Release, build: str) -> None:
+    """For a project with a Gradle or Maven build file, the Java tools' jars are
+    downloaded and checked with the wheels, and put in a directory of their own as
+    `runtime.jar` and `maven-extension.jar`. Once the runtimes are installed, the
+    project's own build gives its classpath where it is, through `invarith setup
+    --in-place`, on the job's PATH, without the job's means of asking for OIDC tokens;
+    then the check is given the project's java, the Java tools and the classpath."""
+    given = with_java(given, tmp_path)
+    variables = java_job(tmp_path, given, build)
+    network, commands = Network(given), Commands()
+    code, said = bootstrapped(variables, network, commands)
+    assert code == 0, said
+    downloaded = {url.split("?")[0] for url, _ in network.calls}
+    for jar in (RUNTIME_JAR, MAVEN_EXTENSION_JAR):
+        assert f"https://storage.example/{jar}" in downloaded
+    home = tmp_path / "runner" / "invarith"
+    project = tmp_path / "shop"
+    java_tools = home / "java-tools"
+    assert {p.name: p.read_bytes() for p in java_tools.iterdir()} == {
+        "runtime.jar": given.java[RUNTIME_JAR].read_bytes(),
+        "maven-extension.jar": given.java[MAVEN_EXTENSION_JAR].read_bytes(),
+    }
+    cli = str(home / "cli" / "bin" / "invarith")
+    (setup, setup_environment), (check, _) = commands.run[-2:]
+    assert setup == [
+        cli,
+        "setup",
+        "--language",
+        "java",
+        "--in-place",
+        "--project",
+        str(project),
+        "--into",
+        str(home / "java-setup"),
+        "--java-tools",
+        str(java_tools),
+    ]
+    assert setup_environment is not None
+    assert setup_environment["PATH"] == str(tmp_path / "job-bin")
+    assert "ACTIONS_ID_TOKEN_REQUEST_URL" not in setup_environment
+    assert "ACTIONS_ID_TOKEN_REQUEST_TOKEN" not in setup_environment
+    assert setup_environment["GITHUB_EVENT_NAME"] == "push"  # the job's, otherwise
+    assert check == [
+        cli,
+        "--server",
+        SERVER,
+        "check",
+        "--project",
+        str(project),
+        "--python",
+        sys.executable,
+        "--tools",
+        str(home / "tools"),
+        "--java",
+        str(tmp_path / "job-bin" / "java"),
+        "--java-tools",
+        str(java_tools),
+        "--java-classpath",
+        str(home / "java-setup" / "java" / "classpath.json"),
+        "--minutes",
+        "15",
+    ]
+
+
+def test_a_project_without_a_java_build(tmp_path: Path, given: Release) -> None:
+    """Without one of Java's markers in the project's directory, as in one holding
+    only Java sources, nothing is downloaded or installed for Java, and no JDK is
+    needed."""
+    given = with_java(given, tmp_path)
+    project = java_project(tmp_path, "gradle")
+    for name in ("settings.gradle.kts", "build.gradle.kts"):
+        (project / name).unlink()
+    variables = environment(tmp_path, given, INVARITH_PROJECT=str(project))
+    network, commands = Network(given), Commands()
+    code, said = bootstrapped(variables, network, commands)
+    assert code == 0, said
+    assert not any(".jar" in url for url, _ in network.calls)
+    assert not any("setup" in command for command, _ in commands.run)
+    assert "--java" not in commands.run[-1][0]
+
+
+def test_the_markers_are_the_release_s(tmp_path: Path, given: Release) -> None:
+    """A project needs the Java tools for a file the release names as one of Java's
+    markers, whatever it is, and not for a build file it doesn't name."""
+    given = with_java(given, tmp_path, {"java": ["build.sbt"], "typescript": ["x"]})
+    variables = java_job(tmp_path, given, "maven")
+    commands = Commands()
+    code, said = bootstrapped(variables, Network(given), commands)
+    assert code == 0, said
+    assert "--java" not in commands.run[-1][0]
+    (tmp_path / "shop" / "build.sbt").write_text("")
+    commands = Commands()
+    code, said = bootstrapped(variables, Network(given), commands)
+    assert code == 0, said
+    assert "--java" in commands.run[-1][0]
+
+
+@pytest.mark.parametrize(
+    ("markers", "problem"),
+    [
+        ({"typescript": ["package.json"]}, "holds the Java runtime, but names no"),
+        ({"java": []}, "as a list of the names of files"),
+        ({"java": "pom.xml"}, "as a list of the names of files"),
+        ({"java": ["../pom.xml"]}, "as a list of the names of files"),
+        ({"java": ["app/pom.xml"]}, "as a list of the names of files"),
+        ({"java": [""]}, "as a list of the names of files"),
+        (None, "holds the Java runtime, but names no markers"),
+    ],
+    ids=["none for Java", "empty", "not a list", "up", "down", "blank", "no markers"],
+)
+def test_a_release_s_markers_that_can_t_be_used(
+    tmp_path: Path,
+    given: Release,
+    markers: dict[str, object] | None,
+    problem: str,
+) -> None:
+    """Each runtime the release holds needs its markers, each a file's name, which is
+    looked for in the project's directory itself."""
+    given = with_java(given, tmp_path)
+    named_path = given.action / "release" / "invarith.json"
+    named = json.loads(named_path.read_text())
+    if markers is None:
+        del named["markers"]
+    else:
+        named["markers"] = markers
+    named_path.write_text(json.dumps(named))
+    code, said = bootstrapped(java_job(tmp_path, given), Network(given), Commands())
+    assert code == 2
+    assert problem in said
+
+
+@pytest.mark.parametrize(
+    "change",
+    ["one jar", "another jar too", "two runtime jars", "a short checksum", "a path"],
+)
+def test_a_release_s_java_runtime_that_isn_t_whole(
+    tmp_path: Path, given: Release, change: str
+) -> None:
+    given = with_java(given, tmp_path)
+    named_path = given.action / "release" / "invarith.json"
+    named = json.loads(named_path.read_text())
+    jars = named["java_runtime"]
+    if change == "one jar":
+        del jars[MAVEN_EXTENSION_JAR]
+    elif change == "another jar too":
+        jars["invarith-other-0.6.0.jar"] = "1" * 64
+    elif change == "a short checksum":
+        jars[RUNTIME_JAR] = "1" * 63
+    elif change == "two runtime jars":
+        del jars[MAVEN_EXTENSION_JAR]
+        jars[f"invarith-runtime-{VERSION}-all.jar"] = "1" * 64
+    else:
+        jars[f"invarith-runtime-{VERSION}/x.jar"] = jars.pop(RUNTIME_JAR)
+    named_path.write_text(json.dumps(named))
+    code, said = bootstrapped(java_job(tmp_path, given), Network(given), Commands())
+    assert code == 2
+    assert "needs the Java tools' jars" in said
+
+
+def test_a_java_project_s_java_input(tmp_path: Path, given: Release) -> None:
+    """The java input, a path, is made absolute, and runs the harnesses, with the
+    javac beside it."""
+    given = with_java(given, tmp_path)
+    jdk = job_bin(tmp_path / "jdk-21", "java", "javac")
+    variables = java_job(tmp_path, given, INVARITH_JAVA=os.path.relpath(jdk / "java"))
+    commands = Commands()
+    code, said = bootstrapped(variables, Network(given), commands)
+    assert code == 0, said
+    check = commands.run[-1][0]
+    assert check[check.index("--java") + 1] == str(jdk / "java")
+
+
+def test_a_java_project_without_java(tmp_path: Path, given: Release) -> None:
+    """With the java input at its default and no java found, the project's build files
+    needn't mean its claims are bound in Java: a warning says so, the Java tools aren't
+    downloaded or installed, and the check isn't given them. A java input the workflow
+    sets must be found."""
+    given = with_java(given, tmp_path)
+    empty = job_bin(tmp_path / "empty")
+    variables = java_job(tmp_path, given, INVARITH_JOB_PATH=str(empty))
+    network, commands = Network(given), Commands()
+    code, said = bootstrapped(variables, network, commands)
+    assert code == 0, said
+    assert said.startswith(
+        "::warning title=invarith::The project has a Java build, but java wasn't "
+        "found, so invarith checks it without its Java tools"
+    )
+    assert not any(".jar" in url for url, _ in network.calls)
+    assert not any("setup" in command for command, _ in commands.run)
+    assert "--java" not in commands.run[-1][0]
+    variables["INVARITH_JAVA"] = "java-21"
+    code, said = bootstrapped(variables, Network(given), Commands())
+    assert code == 2
+    assert "The project's JDK, the java input, is java-21, but java-21 wasn't" in said
+
+
+def test_a_jre_s_java_isn_t_a_jdk_s(tmp_path: Path, given: Release) -> None:
+    """A java with no javac beside it can't compile the harnesses, though a javac is
+    elsewhere on the PATH, which may be another JDK's, as when `/usr/bin/java` and
+    `/usr/bin/javac` are links to two JDKs: each link is followed. At the java
+    input's default, a warning says so, and the Java tools aren't installed; a java
+    input the workflow sets must be a JDK's."""
+    given = with_java(given, tmp_path)
+    jre = job_bin(tmp_path / "jre", "java")
+    jdk = job_bin(tmp_path / "jdk", "javac")
+    links = tmp_path / "usr-bin"
+    links.mkdir()
+    (links / "java").symlink_to(jre / "java")
+    (links / "javac").symlink_to(jdk / "javac")
+    variables = java_job(tmp_path, given, INVARITH_JOB_PATH=str(links))
+    commands = Commands()
+    code, said = bootstrapped(variables, Network(given), commands)
+    assert code == 0, said
+    assert f"but there's no javac beside {jre / 'java'}, so it isn't a JDK's" in said
+    assert "--java" not in commands.run[-1][0]
+    variables["INVARITH_JAVA"] = str(links / "java")
+    code, said = bootstrapped(variables, Network(given), Commands())
+    assert code == 2
+    assert f"there's no javac beside {jre / 'java'}" in said
+
+
+def test_a_java_by_a_link_runs_as_the_jdk_s(tmp_path: Path, given: Release) -> None:
+    """A java found by a link, such as `/usr/bin/java`, is given to the check as the
+    JDK's own, which the link leads to, so its javac is the JDK's too."""
+    given = with_java(given, tmp_path)
+    jdk = job_bin(tmp_path / "jdk-21", "java", "javac")
+    links = tmp_path / "usr-bin"
+    links.mkdir()
+    (links / "java").symlink_to(jdk / "java")
+    variables = java_job(tmp_path, given, INVARITH_JOB_PATH=str(links))
+    commands = Commands()
+    code, said = bootstrapped(variables, Network(given), commands)
+    assert code == 0, said
+    check = commands.run[-1][0]
+    assert check[check.index("--java") + 1] == str(jdk / "java")
+
+
+def test_a_java_project_needs_no_python(tmp_path: Path, given: Release) -> None:
+    """With the python input at its default, and no python found, Python's runtime
+    isn't installed, a notice says so, and the check isn't given an interpreter."""
+    given = with_java(given, tmp_path)
+    variables = java_job(tmp_path, given, INVARITH_PYTHON="python")
+    commands = Commands()
+    code, said = bootstrapped(variables, Network(given), commands)
+    assert code == 0, said
+    assert said.startswith(
+        "::notice title=invarith::No python was found, so invarith checks this Java "
+        "project without its Python runtime"
+    )
+    assert not any("--target" in command for command, _ in commands.run)
+    check = commands.run[-1][0]
+    assert "--python" not in check
+    assert "--java-tools" in check
+
+
+def test_a_java_project_s_python_that_can_t_take_the_runtime(
+    tmp_path: Path, given: Release
+) -> None:
+    """With the python input at its default, a python uv can't install the runtime for
+    is like none found, for a Java project as for a TypeScript one."""
+    given = with_java(given, tmp_path)
+    variables = java_job(
+        tmp_path,
+        given,
+        INVARITH_PYTHON="python",
+        INVARITH_JOB_PATH=str(job_bin(tmp_path, "java", "javac", "python")),
+    )
+    commands = Commands(exits={"--target": 1})
+    code, said = bootstrapped(variables, Network(given), commands)
+    assert code == 0, said
+    assert said.startswith(
+        "::notice title=invarith::invarith's Python runtime couldn't be installed for "
+        f"{tmp_path / 'job-bin' / 'python'}, so invarith checks this Java project"
+    )
+    check = commands.run[-1][0]
+    assert "--python" not in check
+    assert "--java-tools" in check
+
+
+def test_a_project_with_both_a_package_json_and_a_java_build(
+    tmp_path: Path, given: Release
+) -> None:
+    """It needs both runtimes, each installed, and the check is given both."""
+    given = with_java(with_typescript(given, tmp_path), tmp_path)
+    variables = java_job(
+        tmp_path,
+        given,
+        INVARITH_JOB_PATH=str(job_bin(tmp_path, "java", "javac", "node", "npm")),
+        INVARITH_PYTHON="python",
+    )
+    (tmp_path / "shop" / "package.json").write_text('{"type": "module"}\n')
+    commands = Commands()
+    code, said = bootstrapped(variables, Network(given), commands)
+    assert code == 0, said
+    assert "checks this TypeScript and Java project" in said
+    check = commands.run[-1][0]
+    assert "--typescript-tools" in check
+    assert "--java-classpath" in check
+
+
+def test_a_java_build_that_can_t_give_its_classpath(
+    tmp_path: Path, given: Release
+) -> None:
+    """The step goes on without the classpath, since the project's build files needn't
+    mean its claims are bound in Java: the check is given the Java tools, so each claim
+    bound in Java is unknown, saying why, and a warning says the build failed."""
+    given = with_java(given, tmp_path)
+    commands = Commands(exits={"setup": 1})
+    code, said = bootstrapped(java_job(tmp_path, given), Network(given), commands)
+    assert code == 0, said
+    assert "::warning title=invarith::The project's Java build couldn't give" in said
+    check = commands.run[-1][0]
+    assert "check" in check
+    assert "--java-tools" in check
+    assert "--java-classpath" not in check
 
 
 # For real: uv, and a stand-in for the Run API on this machine
@@ -1303,6 +1712,59 @@ def test_a_pinned_npm_package_with_another_integrity_isn_t_installed(
     assert "npm couldn't install the TypeScript runtime's pinned packages" in (
         out.getvalue()
     )
+
+
+def test_the_java_tools_installed_and_checked(tmp_path: Path, given: Release) -> None:
+    """For a small Java project, the jars downloaded from the stand-in for the Run API
+    and checked, installed beside the project's environment, then the CLI's setup run
+    in place, without the job's means of asking for OIDC tokens, and the check run
+    with the classpath it recorded. Which build the project has changes none of it,
+    as test_a_java_project shows."""
+    given = with_java(given, tmp_path)
+    with served_release(given) as address:
+        variables = for_real(tmp_path, given, address)
+        project = java_project(tmp_path, "gradle")
+        jdk = job_bin(tmp_path / "jdk", "java", "javac")
+        variables["INVARITH_PROJECT"] = str(project)
+        variables["INVARITH_JAVA"] = str(jdk / "java")
+        out = io.StringIO()
+        code = bootstrap.main(variables, out=out)
+    assert code == 1, out.getvalue()
+    home = tmp_path / "runner" / "invarith"
+    java_tools = home / "java-tools"
+    assert (java_tools / "runtime.jar").read_bytes() == (
+        given.java[RUNTIME_JAR].read_bytes()
+    )
+    assert (java_tools / "maven-extension.jar").read_bytes() == (
+        given.java[MAVEN_EXTENSION_JAR].read_bytes()
+    )
+    setup = json.loads((tmp_path / "record.json.setup").read_text())
+    assert setup["argv"] == [
+        "setup",
+        "--language",
+        "java",
+        "--in-place",
+        "--project",
+        str(project),
+        "--into",
+        str(home / "java-setup"),
+        "--java-tools",
+        str(java_tools),
+    ]
+    assert setup["path"] == variables["INVARITH_JOB_PATH"]
+    assert setup["token"] is False
+    check = json.loads((tmp_path / "record.json").read_text())
+    assert check["argv"][check["argv"].index("--java") :] == [
+        "--java",
+        str(jdk / "java"),
+        "--java-tools",
+        str(java_tools),
+        "--java-classpath",
+        str(home / "java-setup" / "java" / "classpath.json"),
+        "--minutes",
+        "15",
+    ]
+    assert check["token"] is True  # the check starts the run with it
 
 
 def test_the_audience() -> None:

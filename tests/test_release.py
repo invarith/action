@@ -84,6 +84,18 @@ def with_typescript(release: Path) -> Path:
     return release
 
 
+def with_java(release: Path) -> Path:
+    """The release, holding the Java tools' jars, and each language's markers."""
+    named = json.loads((release / "invarith.json").read_text())
+    named["java_runtime"] = {
+        "invarith-maven-extension-0.6.0.jar": "5" * 64,
+        "invarith-runtime-0.6.0.jar": "4" * 64,
+    }
+    named["markers"] = {"java": ["pom.xml"], "typescript": ["package.json"]}
+    (release / "invarith.json").write_text(json.dumps(named))
+    return release
+
+
 def check_release(directory: Path) -> None:
     """The bootstrapper reads the release, every pinned package has a version and a
     hash, or an npm registry URL and an integrity, and none is an invarith package;
@@ -133,6 +145,19 @@ def test_a_release_with_the_typescript_runtime(release: Path) -> None:
     """check_release reads the TypeScript runtime's lockfile, if the release holds
     it."""
     check_release(with_typescript(release))
+
+
+def test_a_release_with_the_java_tools(release: Path) -> None:
+    """The bootstrapper reads the Java tools' jars and each language's markers, if
+    the release holds them."""
+    directory = with_java(with_typescript(release))
+    check_release(directory)
+    named = bootstrap.read_release(directory)
+    assert named.java == {
+        "invarith-runtime-0.6.0.jar": "4" * 64,
+        "invarith-maven-extension-0.6.0.jar": "5" * 64,
+    }
+    assert named.markers == {"java": ("pom.xml",), "typescript": ("package.json",)}
 
 
 @pytest.mark.parametrize(
@@ -221,6 +246,13 @@ def test_the_notes_with_the_typescript_runtime(release: Path) -> None:
         "| `@esbuild/linux-x64` | `0.28.2` | linux x64 |\n"
         "| `tsx` | `4.23.15` | all |\n"
     )
+
+
+def test_the_notes_with_the_java_tools(release: Path) -> None:
+    """The Java tools' jars are among invarith's packages."""
+    written = notes(with_java(with_typescript(release)))
+    assert f"| `invarith-maven-extension-0.6.0.jar` | `{'5' * 64}` |" in written
+    assert f"| `invarith-runtime-0.6.0.jar` | `{'4' * 64}` |" in written
 
 
 def test_the_command(

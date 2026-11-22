@@ -15,12 +15,20 @@ uv runs it on a Python it provides, with Python's standard library only. In orde
    `runtime.txt`, the third-party packages the tools need, pinned with their hashes.
    A release that holds the TypeScript runtime also lists its npm package in
    `invarith.json`, under `typescript_runtime`, and pins its third-party packages in
-   `typescript-runtime-lock.json`, an npm lockfile (invarith's decision D82).
-3. **The inputs:** the server, the run's time, the project, and its interpreter and
-   Node.js. The project is a TypeScript project if it has a `package.json` and the
-   release holds the TypeScript runtime (D84). A TypeScript project needs its
-   Node.js, and needs no interpreter if the `python` input is its default and isn't
-   found.
+   `typescript-runtime-lock.json`, an npm lockfile (invarith's decision D82). One
+   that holds the Java tools lists their jars under `java_runtime` (D86). Under
+   `markers`, it lists the files that make a project need each of those runtimes
+   (D87); a release from before markers makes a TypeScript project one with a
+   `package.json` (D84).
+3. **The inputs:** the server, the run's time, the project, and its interpreter,
+   Node.js and JDK. The project needs each runtime the release holds one of whose
+   markers is in the project's directory: TypeScript's for a `package.json`, and the
+   Java tools for a Gradle or Maven build file. A TypeScript project needs its
+   Node.js. A Java project needs its JDK's `java`, with a `javac` beside the one any
+   links lead to, if the `java` input is set; at its default, with none found, the
+   Java tools aren't installed, with a warning, since the project's build files
+   needn't mean its claims are bound in Java. Either needs no interpreter if the
+   `python` input is its default and isn't found.
 4. **The job's OIDC token,** for invarith's audience, and with it, the Run API's
    short-lived links to the release's packages (`GET /v1/releases/{version}`).
 5. **The packages,** each downloaded and checked against the SHA-256 the release
@@ -35,16 +43,24 @@ uv runs it on a Python it provides, with Python's standard library only. In orde
      directory of their own, installed by the npm beside the project's Node.js from
      the release's lockfile, with `npm ci --ignore-scripts`, and the runtime's
      package unpacked beside them, in `node_modules/@invarith/runtime`, which
-     `invarith check --typescript-tools` names.
+     `invarith check --typescript-tools` names;
+   - for a Java project, the Java tools' jars in a directory of their own, as
+     `runtime.jar` and `maven-extension.jar`, which `invarith check --java-tools`
+     names. Then `invarith setup --language java --in-place` asks the project's own
+     build, which the workflow has run, for its classpath where it is, on the job's
+     PATH and without the job's means of asking for OIDC tokens, since it runs the
+     project's build scripts. A build that can't give it leaves each claim bound in
+     Java unknown, with a warning, since the project's build files needn't mean its
+     claims are bound in Java.
 
    The third-party packages are installed from the release's lists with
    `--require-hashes`, or from its lockfile, which pins each npm package with its
    integrity, and invarith's wheels with `--no-deps`, so nothing is resolved from a
    package index.
-7. **`invarith check`,** with the project, its interpreter and Node.js, the runtimes'
-   directories and the run's time, on the job's own PATH, which bootstrap.sh keeps,
-   since uv puts its own Python first on the PATH of what it runs. Its exit code is
-   the step's.
+7. **`invarith check`,** with the project, its interpreter, Node.js and JDK, the
+   runtimes' directories, the Java classpath and the run's time, on the job's own
+   PATH, which bootstrap.sh keeps, since uv puts its own Python first on the PATH of
+   what it runs. Its exit code is the step's.
 
 bootstrap.sh finds the project's interpreter on the job's PATH, for the same reason,
 and gives its absolute path, or leaves the input as it is if there's none, for this
@@ -65,7 +81,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, NoReturn, TextIO, cast
 
@@ -87,13 +103,26 @@ RUNTIME_REQUIREMENTS = "runtime.txt"
 RUNTIME_WHEEL = "invarith_runtime-"
 TYPESCRIPT_LOCK = "typescript-runtime-lock.json"
 TYPESCRIPT_PACKAGE = "invarith-typescript-runtime-"
+# The Java tools' jars, by the start of each one's name, and the name the Java adapter
+# takes each by, in the Java tools' directory (invarith's D86).
+JAVA_JARS = {
+    "invarith-runtime-": "runtime.jar",
+    "invarith-maven-extension-": "maven-extension.jar",
+}
 
-# The `python` and `node` inputs' defaults, as action.yml gives them.
+# The `python`, `node` and `java` inputs' defaults, as action.yml gives them.
 DEFAULT_PYTHON = "python"
 DEFAULT_NODE = "node"
+DEFAULT_JAVA = "java"
 
-# What makes a project a TypeScript project, in its directory (invarith's D84).
+# The npm package the TypeScript runtime's install writes, and what makes a project a
+# TypeScript project, in its directory, for a release whose invarith.json names no
+# markers (invarith's D84).
 PACKAGE_JSON = "package.json"
+
+# The languages, besides Python, whose runtimes a release may hold, in the order
+# they're installed, each with its name for people.
+LANGUAGES = {"typescript": "TypeScript", "java": "Java"}
 
 # The registry the TypeScript runtime's lockfile pins its packages from.
 NPM_REGISTRY = "https://registry.npmjs.org/"
@@ -128,9 +157,10 @@ type Run = Callable[[Sequence[str], Mapping[str, str] | None], int]
 @dataclass(frozen=True)
 class Release:
     """What this action release names: the invarith release's version, each
-    package's name and SHA-256, and the pinned third-party packages' lists; and, if
-    it holds the TypeScript runtime, its npm package, with its SHA-256, and the
-    lockfile that pins its third-party packages."""
+    package's name and SHA-256, and the pinned third-party packages' lists; if it
+    holds the TypeScript runtime, its npm package, with its SHA-256, and the lockfile
+    that pins its third-party packages; if it holds the Java tools, their jars, with
+    their SHA-256s; and the files that make a project need each runtime."""
 
     version: str
     packages: dict[str, str]
@@ -138,12 +168,17 @@ class Release:
     runtime_requirements: Path
     typescript: tuple[str, str] | None = None
     typescript_lock: Path | None = None
+    # The Java tools' jars, each with its SHA-256, if the release holds them.
+    java: dict[str, str] | None = None
+    # By language, the files whose presence in a project's directory makes the
+    # bootstrapper install that language's runtime for it (invarith's D87).
+    markers: dict[str, tuple[str, ...]] = field(default_factory=dict[str, Any])
 
 
 @dataclass(frozen=True)
 class Inputs:
     """The action's inputs. `python` is the project's interpreter, or None if it
-    wasn't found; `python_given` and `node` are the inputs as given."""
+    wasn't found; `python_given`, `node` and `java` are the inputs as given."""
 
     server: str
     minutes: str
@@ -151,6 +186,7 @@ class Inputs:
     python: str | None
     python_given: str
     node: str
+    java: str
 
 
 def fetch(url: str, headers: Mapping[str, str]) -> Answer:
@@ -194,35 +230,39 @@ def bootstrap(
     action = Path(_required(environment, "GITHUB_ACTION_PATH"))
     release = read_release(action / "release")
     inputs = read_inputs(environment)
-    typescript = release.typescript is not None and typescript_project(inputs.project)
-    node = project_node(inputs.node, environment) if typescript else None
-    python = project_python(inputs, typescript, out)
+    languages = project_languages(release, inputs.project)
+    node = project_node(inputs.node, environment) if "typescript" in languages else None
+    java = project_java(inputs.java, environment, out) if "java" in languages else None
+    if java is None:
+        languages = tuple(language for language in languages if language != "java")
+    python = project_python(inputs, languages, out)
     home = Path(_required(environment, "RUNNER_TEMP")) / "invarith"
     home.mkdir(parents=True, exist_ok=True)
     token = job_token(environment, send)
-    wanted = files(release, typescript)
+    wanted = files(release, languages)
     links = release_links(inputs.server, release.version, wanted, token, send)
     downloaded = download(wanted, links, home / "packages", send)
     uv = environment.get("UV") or shutil.which("uv") or "uv"
     install(uv, release, downloaded, home, execute)
     tools = None
     if python is not None:
-        # A TypeScript project needs no Python, so an interpreter left at the
+        # A TypeScript or Java project needs no Python, so an interpreter left at the
         # default that can't take the runtime, such as one too old, isn't fatal.
-        optional = typescript and inputs.python_given == DEFAULT_PYTHON
+        optional = bool(languages) and inputs.python_given == DEFAULT_PYTHON
         tools = install_python(uv, release, downloaded, home, python, execute)
         if tools is None and not optional:
             raise Stop("uv couldn't install the Python runtime; its message is above.")
         if tools is None:
             print(
                 f"::notice title=invarith::invarith's Python runtime couldn't be "
-                f"installed for {python}, so invarith checks this TypeScript project "
-                "without it, and can't check a claim bound in Python. To check one, "
-                "set the python input to the project's interpreter.",
+                f"installed for {python}, so invarith checks this {_kind(languages)} "
+                "project without it, and can't check a claim bound in Python. To "
+                "check one, set the python input to the project's interpreter.",
                 file=out,
             )
+    cli = str(home / "cli" / "bin" / "invarith")
     command = [
-        str(home / "cli" / "bin" / "invarith"),
+        cli,
         "--server",
         inputs.server,
         "check",
@@ -237,6 +277,14 @@ def bootstrap(
             release, package, home, node, environment, execute
         )
         command += ["--node", node.node, "--typescript-tools", str(typescript_tools)]
+    if java is not None:
+        java_tools = install_java(release, downloaded, home)
+        command += ["--java", java, "--java-tools", str(java_tools)]
+        classpath = java_classpath(
+            cli, inputs.project, home, java_tools, environment, execute, out
+        )
+        if classpath is not None:
+            command += ["--java-classpath", str(classpath)]
     command += ["--minutes", inputs.minutes]
     print(f"invarith {release.version} is installed; checking.", file=out)
     job = dict(environment)
@@ -309,6 +357,8 @@ def read_release(directory: Path) -> Release:
         if not lock.is_file():
             raise Stop(f"release/{TYPESCRIPT_LOCK} is missing.")
         _package_json(lock.read_text())
+    java = _java_jars(found["java_runtime"]) if "java_runtime" in found else None
+    held = {"typescript": typescript is not None, "java": java is not None}
     return Release(
         version=version,
         packages=packages,
@@ -316,6 +366,8 @@ def read_release(directory: Path) -> Release:
         runtime_requirements=directory / RUNTIME_REQUIREMENTS,
         typescript=typescript,
         typescript_lock=lock,
+        java=java,
+        markers=_markers(found, held),
     )
 
 
@@ -331,6 +383,73 @@ def _typescript_package(listed: object) -> tuple[str, str]:
     raise Stop(
         f"release/{RELEASE} needs the TypeScript runtime's npm package, and its "
         "SHA-256, under typescript_runtime."
+    )
+
+
+def _java_jars(listed: object) -> dict[str, str]:
+    """The Java tools' jars, each with its SHA-256, as `invarith.json` lists them under
+    `java_runtime`: one of each, the runtime's and the Maven extension's."""
+    jars = _fields(listed)
+    named = [
+        [
+            name
+            for name, sha in jars.items()
+            if name.startswith(prefix)
+            and name.endswith(".jar")
+            and "/" not in name
+            and isinstance(sha, str)
+            and len(sha) == 64
+        ]
+        for prefix in JAVA_JARS
+    ]
+    if len(jars) != len(JAVA_JARS) or any(len(names) != 1 for names in named):
+        raise Stop(
+            f"release/{RELEASE} needs the Java tools' jars, the runtime's and the "
+            "Maven extension's, and each one's SHA-256, under java_runtime."
+        )
+    return {name: cast(str, jars[name]) for (name,) in named}
+
+
+def _markers(
+    found: dict[str, Any], held: Mapping[str, bool]
+) -> dict[str, tuple[str, ...]]:
+    """By language, the files that make a project need its runtime, as `invarith.json`
+    lists them under `markers` (invarith's D87): each a file's name, looked for in the
+    project's directory. A release from before markers, such as v0.8.0's, makes a
+    TypeScript project one with a package.json (D84). Each runtime the release holds
+    needs its markers."""
+    if "markers" in found:
+        listed = _fields(found["markers"])
+        markers = {
+            language: tuple(cast(list[str], files))
+            for language, files in listed.items()
+            if isinstance(files, list)
+            and files
+            and all(_file_name(f) for f in cast(list[object], files))
+        }
+        if len(markers) != len(listed):
+            raise Stop(
+                f"release/{RELEASE} needs each language's markers, under markers, as "
+                "a list of the names of files."
+            )
+    else:
+        markers = {"typescript": (PACKAGE_JSON,)}
+    for language, name in LANGUAGES.items():
+        if held[language] and language not in markers:
+            raise Stop(
+                f"release/{RELEASE} holds the {name} runtime, but names no markers "
+                "for it."
+            )
+    return markers
+
+
+def _file_name(given: object) -> bool:
+    """Whether `given` is a file's name, with no directory in it."""
+    return (
+        isinstance(given, str)
+        and given not in ("", ".", "..")
+        and "/" not in given
+        and "\\" not in given
     )
 
 
@@ -357,27 +476,43 @@ def read_inputs(environment: Mapping[str, str]) -> Inputs:
         python=_executable(given, _job_path(environment)),
         python_given=given,
         node=environment.get("INVARITH_NODE") or DEFAULT_NODE,
+        java=environment.get("INVARITH_JAVA") or DEFAULT_JAVA,
     )
 
 
-def typescript_project(project: Path) -> bool:
-    """Whether the project is a TypeScript project, to invarith: one with a
-    `package.json` in its directory (invarith's D84)."""
-    return (project / PACKAGE_JSON).is_file()
+def project_languages(release: Release, project: Path) -> tuple[str, ...]:
+    """The languages besides Python whose runtimes the project needs, in the order
+    they're installed: each whose runtime the release holds, with one of its markers
+    in the project's directory (invarith's D84, D86 and D87)."""
+    held = {
+        "typescript": release.typescript is not None,
+        "java": release.java is not None,
+    }
+    return tuple(
+        language
+        for language in LANGUAGES
+        if held[language]
+        and any((project / marker).is_file() for marker in release.markers[language])
+    )
 
 
-def project_python(inputs: Inputs, typescript: bool, out: TextIO) -> str | None:
-    """The project's interpreter. A TypeScript project needs none if the python input
-    is its default and isn't found: Python's runtime isn't installed, and a notice
-    says so."""
+def _kind(languages: Sequence[str]) -> str:
+    """What the project is, for people, by the languages besides Python it needs."""
+    return " and ".join(LANGUAGES[language] for language in languages)
+
+
+def project_python(inputs: Inputs, languages: Sequence[str], out: TextIO) -> str | None:
+    """The project's interpreter. A project that needs another language's runtime
+    needs none if the python input is its default and isn't found: Python's runtime
+    isn't installed, and a notice says so (invarith's D84 and D86)."""
     if inputs.python is not None:
         return inputs.python
-    if typescript and inputs.python_given == DEFAULT_PYTHON:
+    if languages and inputs.python_given == DEFAULT_PYTHON:
         print(
-            "::notice title=invarith::No python was found, so invarith checks this "
-            "TypeScript project without its Python runtime, and can't check a claim "
-            "bound in Python. To check one, set the python input to the project's "
-            "interpreter.",
+            f"::notice title=invarith::No python was found, so invarith checks this "
+            f"{_kind(languages)} project without its Python runtime, and can't check "
+            "a claim bound in Python. To check one, set the python input to the "
+            "project's interpreter.",
             file=out,
         )
         return None
@@ -406,7 +541,7 @@ def project_node(given: str, environment: Mapping[str, str]) -> Node:
     node = _executable(given, _job_path(environment))
     if node is None:
         raise Stop(
-            f"The project has a {PACKAGE_JSON}, so invarith checks it with its "
+            "The project is a TypeScript project, so invarith checks it with its "
             f"TypeScript runtime, on the project's Node.js, but {given} wasn't found. "
             "Set up Node.js before the invarith step, such as with "
             "actions/setup-node, or set the node input to the project's Node.js."
@@ -420,6 +555,47 @@ def project_node(given: str, environment: Mapping[str, str]) -> Node:
             "its npm, such as with actions/setup-node."
         )
     return Node(node=node, npm=npm, path=path)
+
+
+def project_java(given: str, environment: Mapping[str, str], out: TextIO) -> str | None:
+    """The project's JDK's `java`, for a Java project: the java input, found on the
+    job's PATH if it's a name, and made absolute if it's a path, with any links it
+    goes through followed, to the JDK's own `java`, which needs a `javac` beside it to
+    compile the harnesses (invarith's D86). A link, such as `/usr/bin/java`, may lead
+    to one JDK while `/usr/bin/javac` leads to another.
+
+    With the java input at its default, a project needs no JDK: its build files
+    needn't mean its claims are bound in Java, so with none found, a warning says so,
+    the Java tools aren't installed, and each claim bound in Java is unknown. A java
+    input the workflow sets must be a JDK's."""
+    found = _executable(given, _job_path(environment))
+    java = None if found is None else os.path.realpath(found)
+    javac = None if java is None else Path(java).with_name("javac")
+    if java is not None and javac is not None and _runs(javac):
+        return java
+    if java is None:
+        problem = f"{given} wasn't found"
+    else:
+        problem = f"there's no javac beside {java}, so it isn't a JDK's java"
+    if given == DEFAULT_JAVA:
+        print(
+            "::warning title=invarith::The project has a Java build, but "
+            f"{problem}, so invarith checks it without its Java tools, and each claim "
+            "bound in Java is unknown. To check one, set up a JDK before the invarith "
+            "step, such as with actions/setup-java, or set the java input to the "
+            "project's JDK's java.",
+            file=out,
+        )
+        return None
+    raise Stop(
+        f"The project's JDK, the java input, is {given}, but {problem}. Set the java "
+        "input to the java of the JDK the project builds with."
+    )
+
+
+def _runs(path: Path) -> bool:
+    """Whether `path` is an executable file."""
+    return path.is_file() and os.access(path, os.X_OK)
 
 
 def job_token(environment: Mapping[str, str], send: Fetch) -> str:
@@ -442,13 +618,16 @@ def job_token(environment: Mapping[str, str], send: Fetch) -> str:
     return value
 
 
-def files(release: Release, typescript: bool) -> dict[str, str]:
-    """The release's files to download, each with its SHA-256: its wheels, and, for a
-    TypeScript project, the TypeScript runtime's npm package."""
+def files(release: Release, languages: Sequence[str]) -> dict[str, str]:
+    """The release's files to download, each with its SHA-256: its wheels; for a
+    TypeScript project, the TypeScript runtime's npm package; and for a Java project,
+    the Java tools' jars."""
     wanted = dict(release.packages)
-    if typescript and release.typescript is not None:
+    if "typescript" in languages and release.typescript is not None:
         name, sha = release.typescript
         wanted[name] = sha
+    if "java" in languages and release.java is not None:
+        wanted |= release.java
     return wanted
 
 
@@ -691,6 +870,63 @@ def _package_json(locked: str) -> dict[str, Any]:
         "private": True,
         "dependencies": dependencies,
     }
+
+
+def install_java(release: Release, downloaded: Mapping[str, Path], home: Path) -> Path:
+    """The Java tools, in a directory of their own, never on the project's build path:
+    the jars, checked once downloaded, under the names the Java adapter takes them by,
+    `runtime.jar` and `maven-extension.jar` (invarith's D86)."""
+    tools = home / "java-tools"
+    tools.mkdir(parents=True, exist_ok=True)
+    for name in release.java or {}:
+        prefix = next(p for p in JAVA_JARS if name.startswith(p))
+        shutil.copyfile(downloaded[name], tools / JAVA_JARS[prefix])
+    return tools
+
+
+def java_classpath(
+    cli: str,
+    project: Path,
+    home: Path,
+    tools: Path,
+    environment: Mapping[str, str],
+    execute: Run,
+    out: TextIO,
+) -> Path | None:
+    """The classpath the project's own build gives, where it is, once the workflow
+    has built it: `invarith setup --in-place` records it, and this gives where, or
+    None if the build couldn't give it (invarith's D86). The build runs the project's
+    build scripts, so it runs on the job's PATH, without the job's means of asking for
+    OIDC tokens. A build that fails doesn't stop the step: a project's build files
+    needn't mean its claims are bound in Java, which only the run says, so the check
+    goes on without the classpath, each claim bound in Java unknown, saying why, and
+    a warning says the build failed."""
+    into = home / "java-setup"
+    command = [
+        cli,
+        "setup",
+        "--language",
+        "java",
+        "--in-place",
+        "--project",
+        str(project),
+        "--into",
+        str(into),
+        "--java-tools",
+        str(tools),
+    ]
+    build = {k: v for k, v in environment.items() if k not in TOKEN_VARIABLES}
+    build["PATH"] = _job_path(environment)
+    if execute(command, build) != 0:
+        print(
+            "::warning title=invarith::The project's Java build couldn't give its "
+            "classpath; its message is above. invarith checks the project without it, "
+            "so each claim bound in Java is unknown. Build the project before the "
+            "invarith step, as its CI does.",
+            file=out,
+        )
+        return None
+    return into / "java" / "classpath.json"
 
 
 def unpack(package: Path, into: Path) -> None:

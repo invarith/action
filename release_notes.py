@@ -50,7 +50,11 @@ def notes(directory: Path | None = None) -> str:
     if at is None:
         raise NotARelease("There's no release/invarith.json.")
     named = json.loads((directory / "invarith.json").read_text())
-    packages = named["packages"] | named.get("typescript_runtime", {})
+    packages = (
+        named["packages"]
+        | named.get("typescript_runtime", {})
+        | named.get("java_runtime", {})
+    )
     lines = [
         f"invarith/action v{at} runs invarith {at}: it downloads invarith's "
         "packages below, checks each against its SHA-256, and installs them with "
