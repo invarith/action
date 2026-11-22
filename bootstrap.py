@@ -24,8 +24,11 @@ uv runs it on a Python it provides, with Python's standard library only. In orde
    Node.js and JDK. The project needs each runtime the release holds one of whose
    markers is in the project's directory: TypeScript's for a `package.json`, and the
    Java tools for a Gradle or Maven build file. A TypeScript project needs its
-   Node.js, and a Java project its JDK's `java`, with a `javac` beside it. Either
-   needs no interpreter if the `python` input is its default and isn't found.
+   Node.js. A Java project needs its JDK's `java`, with a `javac` beside the one any
+   links lead to, if the `java` input is set; at its default, with none found, the
+   Java tools aren't installed, with a warning, since the project's build files
+   needn't mean its claims are bound in Java. Either needs no interpreter if the
+   `python` input is its default and isn't found.
 4. **The job's OIDC token,** for invarith's audience, and with it, the Run API's
    short-lived links to the release's packages (`GET /v1/releases/{version}`).
 5. **The packages,** each downloaded and checked against the SHA-256 the release
@@ -229,7 +232,9 @@ def bootstrap(
     inputs = read_inputs(environment)
     languages = project_languages(release, inputs.project)
     node = project_node(inputs.node, environment) if "typescript" in languages else None
-    java = project_java(inputs.java, environment) if "java" in languages else None
+    java = project_java(inputs.java, environment, out) if "java" in languages else None
+    if java is None:
+        languages = tuple(language for language in languages if language != "java")
     python = project_python(inputs, languages, out)
     home = Path(_required(environment, "RUNNER_TEMP")) / "invarith"
     home.mkdir(parents=True, exist_ok=True)
@@ -386,21 +391,23 @@ def _java_jars(listed: object) -> dict[str, str]:
     `java_runtime`: one of each, the runtime's and the Maven extension's."""
     jars = _fields(listed)
     named = [
-        name
+        [
+            name
+            for name, sha in jars.items()
+            if name.startswith(prefix)
+            and name.endswith(".jar")
+            and "/" not in name
+            and isinstance(sha, str)
+            and len(sha) == 64
+        ]
         for prefix in JAVA_JARS
-        for name, sha in jars.items()
-        if name.startswith(prefix)
-        and name.endswith(".jar")
-        and "/" not in name
-        and isinstance(sha, str)
-        and len(sha) == 64
     ]
-    if len(jars) != len(JAVA_JARS) or len(named) != len(JAVA_JARS):
+    if len(jars) != len(JAVA_JARS) or any(len(names) != 1 for names in named):
         raise Stop(
             f"release/{RELEASE} needs the Java tools' jars, the runtime's and the "
             "Maven extension's, and each one's SHA-256, under java_runtime."
         )
-    return {name: cast(str, jars[name]) for name in named}
+    return {name: cast(str, jars[name]) for (name,) in named}
 
 
 def _markers(
@@ -534,7 +541,7 @@ def project_node(given: str, environment: Mapping[str, str]) -> Node:
     node = _executable(given, _job_path(environment))
     if node is None:
         raise Stop(
-            f"The project has a {PACKAGE_JSON}, so invarith checks it with its "
+            "The project is a TypeScript project, so invarith checks it with its "
             f"TypeScript runtime, on the project's Node.js, but {given} wasn't found. "
             "Set up Node.js before the invarith step, such as with "
             "actions/setup-node, or set the node input to the project's Node.js."
@@ -550,27 +557,45 @@ def project_node(given: str, environment: Mapping[str, str]) -> Node:
     return Node(node=node, npm=npm, path=path)
 
 
-def project_java(given: str, environment: Mapping[str, str]) -> str:
+def project_java(given: str, environment: Mapping[str, str], out: TextIO) -> str | None:
     """The project's JDK's `java`, for a Java project: the java input, found on the
-    job's PATH if it's a name, and made absolute if it's a path, with a `javac` beside
-    it, which compiles the harnesses (invarith's D86)."""
-    java = _executable(given, _job_path(environment))
+    job's PATH if it's a name, and made absolute if it's a path, with any links it
+    goes through followed, to the JDK's own `java`, which needs a `javac` beside it to
+    compile the harnesses (invarith's D86). A link, such as `/usr/bin/java`, may lead
+    to one JDK while `/usr/bin/javac` leads to another.
+
+    With the java input at its default, a project needs no JDK: its build files
+    needn't mean its claims are bound in Java, so with none found, a warning says so,
+    the Java tools aren't installed, and each claim bound in Java is unknown. A java
+    input the workflow sets must be a JDK's."""
+    found = _executable(given, _job_path(environment))
+    java = None if found is None else os.path.realpath(found)
+    javac = None if java is None else Path(java).with_name("javac")
+    if java is not None and javac is not None and _runs(javac):
+        return java
     if java is None:
-        raise Stop(
-            "The project has a Java build, so invarith checks it with its Java tools, "
-            f"on the project's JDK, but {given} wasn't found. Set up a JDK before the "
-            "invarith step, such as with actions/setup-java, or set the java input to "
-            "the project's JDK's java."
+        problem = f"{given} wasn't found"
+    else:
+        problem = f"there's no javac beside {java}, so it isn't a JDK's java"
+    if given == DEFAULT_JAVA:
+        print(
+            "::warning title=invarith::The project has a Java build, but "
+            f"{problem}, so invarith checks it without its Java tools, and each claim "
+            "bound in Java is unknown. To check one, set up a JDK before the invarith "
+            "step, such as with actions/setup-java, or set the java input to the "
+            "project's JDK's java.",
+            file=out,
         )
-    javac = Path(java).with_name("javac")
-    if not javac.is_file() or not os.access(javac, os.X_OK):
-        raise Stop(
-            f"There's no javac beside the project's java, {java}, so it isn't a JDK's, "
-            "and invarith compiles its Java harnesses with the JDK's javac. Set up a "
-            "JDK, such as with actions/setup-java, or set the java input to a JDK's "
-            "java."
-        )
-    return java
+        return None
+    raise Stop(
+        f"The project's JDK, the java input, is {given}, but {problem}. Set the java "
+        "input to the java of the JDK the project builds with."
+    )
+
+
+def _runs(path: Path) -> bool:
+    """Whether `path` is an executable file."""
+    return path.is_file() and os.access(path, os.X_OK)
 
 
 def job_token(environment: Mapping[str, str], send: Fetch) -> str:
