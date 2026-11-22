@@ -28,7 +28,7 @@ jobs:
           fetch-depth: 2
       - uses: astral-sh/setup-uv@v10
       - run: uv sync --locked
-      - uses: invarith/action@v0.8.0
+      - uses: invarith/action@v0.9.0
         with:
           python: .venv/bin/python
 ```
@@ -47,7 +47,7 @@ A TypeScript or JavaScript project, one with a `package.json` in the project's d
           node-version: 24
           cache: npm
       - run: npm ci
-      - uses: invarith/action@v0.8.0
+      - uses: invarith/action@v0.9.0
 ```
 
 A Java project, one with a Gradle or Maven build file in the project's directory, sets up its JDK and builds the project before the invarith step, in the same job, with an action release from v0.9.0 on, the first that holds invarith's Java tools:
@@ -70,11 +70,11 @@ A Maven project builds with `./mvnw --batch-mode verify`, or `mvn`, with `cache:
 
 - **When it runs:** on pull requests, and on pushes to the default branch. A push's run is what moves invarith's record of the claims forward once a change merges.
 - **After the project's dependencies are installed.** The harnesses import the project's code with its dependencies, on the interpreter the `python` input names, or, for a TypeScript project, on the Node.js the `node` input names, from the project's `node_modules`, or, for a Java project, on the JDK the `java` input names, with the classpath the project's build gives. Install them, or build the project, the way the project's own CI does.
-- **A TypeScript project** needs the Node.js that the TypeScript runtime's pinned packages need: for v0.8.0, 24.11 or later, or 22.18 or later in the 22 line, as its @babel/parser requires. It needs npm too, which the action installs invarith's TypeScript runtime with, from the npm registry, reading none of the job's npm configuration, such as a registry `actions/setup-node` names for the project's own packages. It needs no Python: if `python` is left at its default, and the runner has no `python`, or one the Python runtime can't be installed for, the action checks the project without its Python runtime, and says so.
+- **A TypeScript project** needs the Node.js that the TypeScript runtime's pinned packages need: for v0.8.0 and v0.9.0, 24.11 or later, or 22.18 or later in the 22 line, as its @babel/parser requires. It needs npm too, which the action installs invarith's TypeScript runtime with, from the npm registry, reading none of the job's npm configuration, such as a registry `actions/setup-node` names for the project's own packages. It needs no Python: if `python` is left at its default, and the runner has no `python`, or one the Python runtime can't be installed for, the action checks the project without its Python runtime, and says so.
 - **A Java project** needs a JDK: the `java` the `java` input names, by default the one `actions/setup-java` puts first on the PATH, with a `javac` beside it, which compiles the harnesses. A `java` that's a link, such as `/usr/bin/java`, is followed to the JDK's own. It should be the JDK the project builds with, since the harnesses run the classes its build compiled. With the `java` input at its default and no JDK found, the action checks the project without its Java tools, and a warning says so; a `java` input the workflow sets must be a JDK's. Once the runtimes are installed, the action asks the project's own Gradle or Maven build for its classpath, where it is, with `invarith setup --in-place` (invarith/backend's decision D86). That runs the build again, with the caches the workflow's build used, so it's mostly up to date if the workflow built the project in the same job. It runs on the job's PATH, without the job's means of asking for OIDC tokens. A build that can't give the classpath doesn't stop the step, since a project's build files needn't mean its claims are bound in Java: the check runs without it, each claim bound in Java is unknown, and a warning says so. The `minutes` input bounds the check, not this build, which takes as long as the project's build does. A Java project needs no Python either, as a TypeScript project doesn't.
 - **`fetch-depth: 2`.** On a pull request, the checkout is GitHub's merge commit, and invarith compares it with its first parent, the base.
 - **Permissions:** `id-token: write`, so the job can sign in to invarith with its OIDC token, and otherwise only `contents: read`. No secret is needed.
-- **Pin the action** to a full release tag, such as `invarith/action@v0.8.0`, or to a release's commit SHA. A release's tag is the version of the invarith release it runs. A commit between releases names no invarith release, and fails saying so.
+- **Pin the action** to a full release tag, such as `invarith/action@v0.9.0`, or to a release's commit SHA. A release's tag is the version of the invarith release it runs. A commit between releases names no invarith release, and fails saying so.
 - **Never run it under `pull_request_target`,** which would run a fork's code with this repository's permissions. The action refuses to.
 - **Linux runners only,** on x86_64 or arm64, GitHub-hosted or self-hosted. The runner needs `curl`, `tar` and `sha256sum`.
 
