@@ -50,14 +50,44 @@ def release(tmp_path: Path) -> Path:
     return directory
 
 
-def test_the_repository_s_release() -> None:
-    """If `release/` is here, the bootstrapper reads it, every pinned package has a
-    version and a hash, and none is an invarith package; the release workflow takes
-    its version and notes from it."""
-    directory = REPOSITORY / "release"
-    if not directory.exists():
-        assert version(directory) is None
-        return
+LOCK = {
+    "name": "invarith-typescript-runtime-dependencies",
+    "lockfileVersion": 3,
+    "requires": True,
+    "packages": {
+        "": {
+            "name": "invarith-typescript-runtime-dependencies",
+            "dependencies": {"tsx": "4.23.15"},
+        },
+        "node_modules/@esbuild/linux-x64": {
+            "version": "0.28.2",
+            "resolved": "https://registry.npmjs.org/@esbuild/linux-x64/-/linux-x64-0.28.2.tgz",
+            "integrity": "sha512-" + "e" * 86 + "==",
+            "cpu": ["x64"],
+            "optional": True,
+            "os": ["linux"],
+        },
+        "node_modules/tsx": {
+            "version": "4.23.15",
+            "resolved": "https://registry.npmjs.org/tsx/-/tsx-4.23.15.tgz",
+            "integrity": "sha512-" + "f" * 86 + "==",
+        },
+    },
+}
+
+
+def with_typescript(release: Path) -> Path:
+    named = json.loads((release / "invarith.json").read_text())
+    named["typescript_runtime"] = {"invarith-typescript-runtime-0.6.0.tgz": "3" * 64}
+    (release / "invarith.json").write_text(json.dumps(named))
+    (release / "typescript-runtime-lock.json").write_text(json.dumps(LOCK))
+    return release
+
+
+def check_release(directory: Path) -> None:
+    """The bootstrapper reads the release, every pinned package has a version and a
+    hash, or an npm registry URL and an integrity, and none is an invarith package;
+    the release workflow takes its version and notes from it."""
     named = bootstrap.read_release(directory)
     assert version(directory) == named.version
     for requirements in (named.cli_requirements, named.runtime_requirements):
@@ -69,7 +99,63 @@ def test_the_repository_s_release() -> None:
             assert re.match(r"[A-Za-z0-9][A-Za-z0-9._-]*==\S+", block), block
             assert "--hash=sha256:" in block, block
             assert not block.lower().startswith("invarith"), block
+    if named.typescript_lock is not None:
+        locked = json.loads(named.typescript_lock.read_text())
+        assert locked["lockfileVersion"] == 3
+        packages = locked["packages"]
+        root = bootstrap._package_json(  # pyright: ignore[reportPrivateUsage]
+            named.typescript_lock.read_text()
+        )["dependencies"]
+        for name, pin in root.items():
+            assert packages[f"node_modules/{name}"]["version"] == pin, name
+        for path, entry in packages.items():
+            if not path:
+                continue
+            name = path.rsplit("node_modules/", 1)[-1]
+            assert not name.startswith(("invarith", "@invarith/")), path
+            assert re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+\S*", entry["version"]), path
+            assert entry["resolved"].startswith("https://registry.npmjs.org/"), path
+            assert entry["integrity"].startswith("sha512-"), path
+        assert "## Pinned for the TypeScript runtime" in notes(directory)
     assert f"invarith/action v{named.version} runs invarith" in notes(directory)
+
+
+def test_the_repository_s_release() -> None:
+    """If `release/` is here, it's a whole release, as check_release checks."""
+    directory = REPOSITORY / "release"
+    if not directory.exists():
+        assert version(directory) is None
+        return
+    check_release(directory)
+
+
+def test_a_release_with_the_typescript_runtime(release: Path) -> None:
+    """check_release reads the TypeScript runtime's lockfile, if the release holds
+    it."""
+    check_release(with_typescript(release))
+
+
+@pytest.mark.parametrize(
+    "broken",
+    ["from another registry", "no integrity", "an invarith package", "out of step"],
+)
+def test_a_typescript_runtime_lockfile_that_isn_t_pinned(
+    release: Path, broken: str
+) -> None:
+    with_typescript(release)
+    lock = json.loads(json.dumps(LOCK))
+    tsx = lock["packages"]["node_modules/tsx"]
+    if broken == "from another registry":
+        tsx["resolved"] = "https://npm.example/tsx/-/tsx-4.23.15.tgz"
+    elif broken == "no integrity":
+        del tsx["integrity"]
+    elif broken == "an invarith package":
+        lock["packages"]["node_modules/@invarith/runtime"] = dict(tsx)
+    else:
+        tsx["version"] = "4.23.14"
+    (release / "typescript-runtime-lock.json").write_text(json.dumps(lock))
+    with pytest.raises((AssertionError, KeyError)):
+        check_release(release)
 
 
 def test_the_version(release: Path) -> None:
@@ -117,6 +203,23 @@ def test_the_notes(release: Path) -> None:
         "| Package | Version |\n"
         "|---|---|\n"
         "| `hypothesis` | `6.170.15` |\n"
+    )
+
+
+def test_the_notes_with_the_typescript_runtime(release: Path) -> None:
+    """The runtime's npm package is among invarith's packages, and the packages its
+    lockfile pins are listed with the platforms they're for."""
+    written = notes(with_typescript(release))
+    assert f"| `invarith-typescript-runtime-0.6.0.tgz` | `{'3' * 64}` |" in written
+    assert written.endswith(
+        "## Pinned for the TypeScript runtime\n"
+        "\n"
+        "npm installs each one on the platforms it's for.\n"
+        "\n"
+        "| Package | Version | Platforms |\n"
+        "|---|---|---|\n"
+        "| `@esbuild/linux-x64` | `0.28.2` | linux x64 |\n"
+        "| `tsx` | `4.23.15` | all |\n"
     )
 
 

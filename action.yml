@@ -24,6 +24,12 @@ inputs:
       which runs the harnesses: a name on the PATH, or a path.
     required: false
     default: python
+  node:
+    description: >-
+      The project's Node.js, which runs the harnesses of a TypeScript or JavaScript
+      project, one with a package.json: a name on the PATH, or a path.
+    required: false
+    default: node
 
 runs:
   using: composite
@@ -37,4 +43,5 @@ runs:
         INVARITH_MINUTES: ${{ inputs.minutes }}
         INVARITH_PROJECT: ${{ inputs.project }}
         INVARITH_PYTHON: ${{ inputs.python }}
+        INVARITH_NODE: ${{ inputs.node }}
       run: '"$GITHUB_ACTION_PATH/bootstrap.sh"'
