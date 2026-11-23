@@ -273,8 +273,8 @@ def with_java(
     given: Release, tmp_path: Path, markers: Mapping[str, list[str]] | None = None
 ) -> Release:
     """The release, holding the Java tools: their jars, built here, under
-    `java_runtime`, and each language's markers, Java's and TypeScript's by default,
-    under `markers`."""
+    `java_runtime`, and each language's markers, under `markers`: by default, Java's,
+    and TypeScript's if the release holds its runtime."""
     built = tmp_path / "built"
     jars: dict[str, Path] = {}
     for name in (RUNTIME_JAR, MAVEN_EXTENSION_JAR):
@@ -283,11 +283,11 @@ def with_java(
     directory = given.action / "release"
     named = json.loads((directory / "invarith.json").read_text())
     named["java_runtime"] = {name: sha256(path) for name, path in jars.items()}
-    named["markers"] = (
-        {"java": JAVA_MARKERS, "typescript": ["package.json"]}
-        if markers is None
-        else dict(markers)
-    )
+    if markers is None:
+        markers = {"java": JAVA_MARKERS}
+        if given.typescript:
+            markers = {**markers, "typescript": ["package.json"]}
+    named["markers"] = dict(markers)
     (directory / "invarith.json").write_text(json.dumps(named))
     return Release(given.action, given.packages, given.typescript, jars)
 
@@ -512,6 +512,7 @@ def test_a_commit_that_names_no_release(tmp_path: Path, given: Release) -> None:
     code, said = bootstrapped(environment(tmp_path, given), Network(given), Commands())
     assert code == 2
     assert "names no invarith release" in said
+    assert "invarith/action@vX.Y.Z" in said
     assert "invarith/action@v" in said
 
 
@@ -1274,7 +1275,7 @@ def test_a_project_without_a_java_build(tmp_path: Path, given: Release) -> None:
 def test_the_markers_are_the_release_s(tmp_path: Path, given: Release) -> None:
     """A project needs the Java tools for a file the release names as one of Java's
     markers, whatever it is, and not for a build file it doesn't name."""
-    given = with_java(given, tmp_path, {"java": ["build.sbt"], "typescript": ["x"]})
+    given = with_java(given, tmp_path, {"java": ["build.sbt"]})
     variables = java_job(tmp_path, given, "maven")
     commands = Commands()
     code, said = bootstrapped(variables, Network(given), commands)
@@ -1290,7 +1291,11 @@ def test_the_markers_are_the_release_s(tmp_path: Path, given: Release) -> None:
 @pytest.mark.parametrize(
     ("markers", "problem"),
     [
-        ({"typescript": ["package.json"]}, "holds the Java runtime, but names no"),
+        ({}, "holds the Java runtime, but names no"),
+        (
+            {"java": JAVA_MARKERS, "typescript": ["package.json"]},
+            "names markers for typescript, but holds no runtime for it",
+        ),
         ({"java": []}, "as a list of the names of files"),
         ({"java": "pom.xml"}, "as a list of the names of files"),
         ({"java": ["../pom.xml"]}, "as a list of the names of files"),
@@ -1298,7 +1303,16 @@ def test_the_markers_are_the_release_s(tmp_path: Path, given: Release) -> None:
         ({"java": [""]}, "as a list of the names of files"),
         (None, "holds the Java runtime, but names no markers"),
     ],
-    ids=["none for Java", "empty", "not a list", "up", "down", "blank", "no markers"],
+    ids=[
+        "none for Java",
+        "for a runtime it doesn't hold",
+        "empty",
+        "not a list",
+        "up",
+        "down",
+        "blank",
+        "no markers",
+    ],
 )
 def test_a_release_s_markers_that_can_t_be_used(
     tmp_path: Path,
@@ -1307,7 +1321,9 @@ def test_a_release_s_markers_that_can_t_be_used(
     problem: str,
 ) -> None:
     """Each runtime the release holds needs its markers, each a file's name, which is
-    looked for in the project's directory itself."""
+    looked for in the project's directory itself; and each language with markers
+    needs its runtime, since a runtime dropped from a release that still names its
+    markers would leave its projects without it, and without a word."""
     given = with_java(given, tmp_path)
     named_path = given.action / "release" / "invarith.json"
     named = json.loads(named_path.read_text())

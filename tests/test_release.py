@@ -249,10 +249,12 @@ def test_the_notes_with_the_typescript_runtime(release: Path) -> None:
 
 
 def test_the_notes_with_the_java_tools(release: Path) -> None:
-    """The Java tools' jars are among invarith's packages."""
+    """The Java tools' jars are among invarith's packages, and the notes say what
+    third-party code they hold; a release without them says nothing of it."""
     written = notes(with_java(with_typescript(release)))
     assert f"| `invarith-maven-extension-0.6.0.jar` | `{'5' * 64}` |" in written
     assert f"| `invarith-runtime-0.6.0.jar` | `{'4' * 64}` |" in written
+    assert "holds its one third-party dependency, Byte Buddy, shaded" in written
 
 
 def test_the_command(

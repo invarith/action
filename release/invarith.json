@@ -1,15 +1,31 @@
 {
-  "version": "0.8.0",
+  "version": "0.9.0",
   "packages": {
-    "invarith_adapter_java-0.8.0-py3-none-any.whl": "fc76aea3137d67efc0e306e6fd6525745e04a9c417618e54bd553b9702767dd3",
-    "invarith_adapter_python-0.8.0-py3-none-any.whl": "45840f0c046679e1728ed54b8e2d5da079c1feb186047a7aaf92d2b4df2ad300",
-    "invarith_adapter_typescript-0.8.0-py3-none-any.whl": "d1bad2b57dea3b4e4fb56ec579c6c1a5efdbcfa924a70cdb0a21234193088731",
-    "invarith_cli-0.8.0-py3-none-any.whl": "960734af7c4cca9d7113cf18471486c37a2005584453e4d9578426c583104565",
-    "invarith_core-0.8.0-py3-none-any.whl": "31cea5f12aaaba77ed1bbbe65c9ca1a4d966b037cd15b5ae0a49807e66b86d59",
-    "invarith_runtime-0.8.0-py3-none-any.whl": "288743e4f8884e94926bb8bcd76fe59647715c25eeef3c6ab1e6b547069fe5c0",
-    "invarith_verifier-0.8.0-py3-none-any.whl": "54cb7ff4e056567417e01ce7654d945f6155901837eb3c1f8c3de6b759cd96ce"
+    "invarith_adapter_java-0.9.0-py3-none-any.whl": "701a006bd62e96db11cfae1c17f5bde871f46ca2a2a241b0b5dec26e059fd230",
+    "invarith_adapter_python-0.9.0-py3-none-any.whl": "af95e066e6ba957e280d93607ff407698bc19efb0ad67eede2ea857d94e5faf3",
+    "invarith_adapter_typescript-0.9.0-py3-none-any.whl": "a84d06feb54a398cf20cf03eb4e8c17fd859764ea9ab15147834e9b5e85827a3",
+    "invarith_cli-0.9.0-py3-none-any.whl": "9d03cc2515298690f990530cd876b39e6be9efaa1e99b54c105137b58d622875",
+    "invarith_core-0.9.0-py3-none-any.whl": "07b64fbc0d3b9bccf955774c758670d59ae1d0f5135c0b0b769ac45a8a407830",
+    "invarith_runtime-0.9.0-py3-none-any.whl": "5aacdff279d97b1849d2f825e8d523c58298d7b78a74af9b3d8bb346b6c9ce2b",
+    "invarith_verifier-0.9.0-py3-none-any.whl": "e9083ce06ba223de578abdddcca6ea9c3474abce6ca0ac57b731127942bb9041"
   },
   "typescript_runtime": {
-    "invarith-typescript-runtime-0.8.0.tgz": "2cea69446212da3daa608367553bcfe512fcaf074fdd149f8dd95f7f6775f87d"
+    "invarith-typescript-runtime-0.9.0.tgz": "78fdd66faed4ecd2896fb3fb8aab489f7c43d44c6eb36befbfa2c4f027ba08d6"
+  },
+  "java_runtime": {
+    "invarith-maven-extension-0.9.0.jar": "96c24c8886fd3415307bf48c42da8885a3bccee0437a14dfd33fee5cd2c0ec70",
+    "invarith-runtime-0.9.0.jar": "4b20290e6130fb6c629d83330524e409fd85c8e5af1585d9a0a1cb4e978bd0a0"
+  },
+  "markers": {
+    "java": [
+      "settings.gradle",
+      "settings.gradle.kts",
+      "build.gradle",
+      "build.gradle.kts",
+      "pom.xml"
+    ],
+    "typescript": [
+      "package.json"
+    ]
   }
 }
