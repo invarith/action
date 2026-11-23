@@ -1627,6 +1627,87 @@ def test_a_java_project_without_a_jdk_and_a_python_too_old(
     assert not any("check" in command for command, _ in commands.run)
 
 
+def test_skip_languages_leaves_java_out(tmp_path: Path, given: Release) -> None:
+    """With `skip-languages: java`, a project with a Java build, such as a Python one
+    with a Gradle build for another part of its repository, is checked without the
+    Java tools: none are downloaded, its build isn't run, no JDK is needed, and a
+    notice says so."""
+    given = with_java(given, tmp_path)
+    empty = job_bin(tmp_path / "empty")
+    variables = java_job(
+        tmp_path,
+        given,
+        INVARITH_JOB_PATH=str(empty),
+        INVARITH_SKIP_LANGUAGES="java",
+    )
+    network, commands = Network(given), Commands()
+    code, said = bootstrapped(variables, network, commands)
+    assert code == 0, said
+    assert said.startswith(
+        "::notice title=invarith::The project has Java files, but the "
+        "skip-languages input leaves Java out, so invarith checks it without its "
+        "Java runtime, and can't check a claim bound in Java.\n"
+    )
+    assert "::warning" not in said
+    assert not any(".jar" in url for url, _ in network.calls)
+    assert not any("setup" in command for command, _ in commands.run)
+    assert not any(a.startswith("--java") for a in commands.run[-1][0])
+
+
+def test_skip_languages_takes_spaces_and_commas(tmp_path: Path, given: Release) -> None:
+    """Languages are separated by spaces or commas, in any case, and one the project
+    has no files of is left out without a word."""
+    given = with_java(with_typescript(given, tmp_path), tmp_path)
+    job = java_job(tmp_path, given)
+    for skipped in ("typescript, java", "java typescript", "Java,TypeScript"):
+        variables = job | {"INVARITH_SKIP_LANGUAGES": skipped}
+        commands = Commands()
+        code, said = bootstrapped(variables, Network(given), commands)
+        assert code == 0, said
+        assert "leaves Java out" in said
+        assert "leaves TypeScript out" not in said  # the project has no package.json
+        check = commands.run[-1][0]
+        assert "--java-tools" not in check
+        assert "--typescript-tools" not in check
+
+
+def test_skip_languages_says_so_only_once_the_step_goes_on(
+    tmp_path: Path, given: Release
+) -> None:
+    """A project that leaves out its only other language is checked as a Python
+    project, so with no `python`, the step stops, without first saying it goes on
+    without the language's runtime."""
+    given = with_java(given, tmp_path)
+    variables = java_job(
+        tmp_path,
+        given,
+        INVARITH_JOB_PATH=str(job_bin(tmp_path / "empty")),
+        INVARITH_PYTHON="python",
+        INVARITH_SKIP_LANGUAGES="java",
+    )
+    code, said = bootstrapped(variables, Network(given), Commands())
+    assert code == 2
+    assert said == (
+        "::error title=invarith::The project's interpreter, python, wasn't found. "
+        "Set the python input to the interpreter the project's dependencies are "
+        "installed for.\n"
+    )
+
+
+@pytest.mark.parametrize("skipped", ["python", "kotlin", "java, Kotlin"])
+def test_skip_languages_names_only_languages_it_can_leave_out(
+    tmp_path: Path, given: Release, skipped: str
+) -> None:
+    given = with_java(given, tmp_path)
+    variables = java_job(tmp_path, given, INVARITH_SKIP_LANGUAGES=skipped)
+    commands = Commands()
+    code, said = bootstrapped(variables, Network(given), commands)
+    assert code == 2
+    assert "The skip-languages input names" in said
+    assert "but it can leave out only typescript and java" in said
+    assert commands.run == []
+
+
 def test_a_java_build_that_can_t_give_its_classpath(
     tmp_path: Path, given: Release
 ) -> None:
