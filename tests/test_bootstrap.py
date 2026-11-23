@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tarfile
 import threading
+import time
 import zipfile
 from collections.abc import Generator, Iterator, Mapping, Sequence
 from contextlib import contextmanager
@@ -1542,10 +1543,23 @@ def test_a_command_is_stopped_at_its_time_limit(tmp_path: Path) -> None:
     command = ["sh", "-c", f'sleep 30 & echo $! > "{started}"; wait']
     assert bootstrap.run(command, None, timeout=0.5) == bootstrap.TIMED_OUT
     child = int(started.read_text())
-    stat = Path(f"/proc/{child}/stat")
-    # Gone, or a zombie no process has reaped yet, but not running.
-    assert not stat.exists() or stat.read_text().split(")")[1].split()[0] == "Z"
+    # A signal is delivered as the kernel gets to it, so the child may take a moment
+    # to die once `run` returns: soon, it's gone, or a zombie no process has reaped
+    # yet, and not running.
+    deadline = time.monotonic() + 10
+    while _process_state(child) not in (None, "Z"):
+        assert time.monotonic() < deadline, f"{child} is still running"
+        time.sleep(0.01)
     assert bootstrap.run(["sh", "-c", "exit 3"], None) == 3
+
+
+def _process_state(pid: int) -> str | None:
+    """A process's state, as /proc gives it, such as "R" or "Z", or None if it's
+    gone."""
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().split(")")[1].split()[0]
+    except FileNotFoundError:
+        return None
 
 
 def test_a_java_input_set_to_java_must_be_a_jdk_s(
