@@ -41,6 +41,14 @@ inputs:
       even to java, it must be a JDK's.
     required: false
     default: ""
+  skip-languages:
+    description: >-
+      The languages whose runtimes the action leaves out, though the project has
+      their files, such as a Gradle build for another part of the repository: java,
+      typescript, or both, separated by spaces or commas. A claim bound in a language
+      left out isn't checked.
+    required: false
+    default: ""
 
 runs:
   using: composite
@@ -56,4 +64,5 @@ runs:
         INVARITH_PYTHON: ${{ inputs.python }}
         INVARITH_NODE: ${{ inputs.node }}
         INVARITH_JAVA: ${{ inputs.java }}
+        INVARITH_SKIP_LANGUAGES: ${{ inputs.skip-languages }}
       run: '"$GITHUB_ACTION_PATH/bootstrap.sh"'

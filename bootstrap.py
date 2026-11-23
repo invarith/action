@@ -23,7 +23,8 @@ uv runs it on a Python it provides, with Python's standard library only. In orde
 3. **The inputs:** the server, the run's time, the project, and its interpreter,
    Node.js and JDK. The project needs each runtime the release holds one of whose
    markers is in the project's directory: TypeScript's for a `package.json`, and the
-   Java tools for a Gradle or Maven build file. A TypeScript project needs its
+   Java tools for a Gradle or Maven build file, unless the `skip-languages` input
+   leaves the language out, with a notice. A TypeScript project needs its
    Node.js. A Java project needs its JDK's `java`, with a `javac` beside the one any
    links lead to, if the workflow sets the `java` input; left at its default, with
    none found, the Java tools aren't installed, with a warning, since the project's
@@ -196,8 +197,9 @@ class Release:
 class Inputs:
     """The action's inputs. `python` is the project's interpreter, or None if it
     wasn't found; `python_given`, `node` and `java` are the inputs as given, or their
-    defaults; and `java_set` is whether the workflow set the java input, which
-    action.yml gives as empty if it didn't."""
+    defaults; `java_set` is whether the workflow set the java input, which
+    action.yml gives as empty if it didn't; and `skipped` are the languages the
+    skip-languages input leaves out."""
 
     server: str
     minutes: str
@@ -207,6 +209,7 @@ class Inputs:
     node: str
     java: str
     java_set: bool = False
+    skipped: frozenset[str] = frozenset()
 
 
 def fetch(url: str, headers: Mapping[str, str]) -> Answer:
@@ -264,6 +267,17 @@ def bootstrap(
     release = read_release(action / "release")
     inputs = read_inputs(environment)
     languages = project_languages(release, inputs.project)
+    for language in languages:
+        if language in inputs.skipped:
+            name = LANGUAGES[language]
+            print(
+                f"::notice title=invarith::The project has {name} files, but the "
+                f"skip-languages input leaves {name} out, so invarith checks it "
+                f"without its {name} runtime, and can't check a claim bound in "
+                f"{name}.",
+                file=out,
+            )
+    languages = tuple(lang for lang in languages if lang not in inputs.skipped)
     node = project_node(inputs.node, environment) if "typescript" in languages else None
     java, without_jdk = (
         project_java(inputs, environment) if "java" in languages else (None, None)
@@ -529,6 +543,19 @@ def read_inputs(environment: Mapping[str, str]) -> Inputs:
         raise Stop("The minutes input must be a number of minutes above 0.") from None
     given = environment.get("INVARITH_PYTHON") or DEFAULT_PYTHON
     project = Path(environment.get("INVARITH_PROJECT", ".")).resolve()
+    skipped = frozenset(
+        name
+        for name in environment.get("INVARITH_SKIP_LANGUAGES", "")
+        .replace(",", " ")
+        .split()
+    )
+    unknown = sorted(skipped - set(LANGUAGES))
+    if unknown:
+        raise Stop(
+            f"The skip-languages input names {', '.join(unknown)}, but it can leave "
+            f"out only {' and '.join(LANGUAGES)}, the languages whose runtimes the "
+            "action installs for a project's build files."
+        )
     return Inputs(
         server=server,
         minutes=minutes,
@@ -538,6 +565,7 @@ def read_inputs(environment: Mapping[str, str]) -> Inputs:
         node=environment.get("INVARITH_NODE") or DEFAULT_NODE,
         java=environment.get("INVARITH_JAVA") or DEFAULT_JAVA,
         java_set=bool(environment.get("INVARITH_JAVA")),
+        skipped=skipped,
     )
 
 
