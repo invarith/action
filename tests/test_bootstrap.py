@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tarfile
 import threading
+import time
 import zipfile
 from collections.abc import Generator, Iterator, Mapping, Sequence
 from contextlib import contextmanager
@@ -371,17 +372,23 @@ class Network:
 
 @dataclass
 class Commands:
-    """The commands it runs, each answered with `exits`'s code, or 0."""
+    """The commands it runs, each answered with `exits`'s code, or 0, and the time
+    limit each was given."""
 
     run: list[tuple[list[str], Mapping[str, str] | None]] = field(
         default_factory=list[Any]
     )
     exits: dict[str, int] = field(default_factory=dict[str, int])
+    timeouts: list[float | None] = field(default_factory=list[float | None])
 
     def __call__(
-        self, command: Sequence[str], environment: Mapping[str, str] | None
+        self,
+        command: Sequence[str],
+        environment: Mapping[str, str] | None,
+        timeout: float | None = None,
     ) -> int:
         self.run.append((list(command), environment))
+        self.timeouts.append(timeout)
         for mark, code in self.exits.items():
             if mark in command:
                 return code
@@ -1233,6 +1240,9 @@ def test_a_java_project(tmp_path: Path, given: Release, build: str) -> None:
     assert "ACTIONS_ID_TOKEN_REQUEST_URL" not in setup_environment
     assert "ACTIONS_ID_TOKEN_REQUEST_TOKEN" not in setup_environment
     assert setup_environment["GITHUB_EVENT_NAME"] == "push"  # the job's, otherwise
+    # The minutes input bounds the build, as it bounds the check; nothing else is.
+    assert commands.timeouts[-2] == 15 * 60
+    assert set(commands.timeouts[:-2] + commands.timeouts[-1:]) == {None}
     assert check == [
         cli,
         "--server",
@@ -1504,6 +1514,117 @@ def test_a_project_with_both_a_package_json_and_a_java_build(
     check = commands.run[-1][0]
     assert "--typescript-tools" in check
     assert "--java-classpath" in check
+
+
+def test_a_java_build_that_runs_past_its_time(tmp_path: Path, given: Release) -> None:
+    """A build still running after the minutes input's time is stopped, and the step
+    goes on, as for a build that can't give its classpath, with a warning that says
+    so."""
+    given = with_java(given, tmp_path)
+    variables = java_job(tmp_path, given, INVARITH_MINUTES="2.5")
+    commands = Commands(exits={"setup": bootstrap.TIMED_OUT})
+    code, said = bootstrapped(variables, Network(given), commands)
+    assert code == 0, said
+    assert commands.timeouts[-2] == 150
+    assert (
+        "::warning title=invarith::The project's Java build didn't give its classpath "
+        "within 2.5 minutes, the minutes input, so it was stopped." in said
+    )
+    check = commands.run[-1][0]
+    assert "--java-tools" in check
+    assert "--java-classpath" not in check
+
+
+def test_a_command_is_stopped_at_its_time_limit(tmp_path: Path) -> None:
+    """`run` gives TIMED_OUT for a command still running at its time limit, which it
+    stops with every process it started, as `invarith setup` starts the build's, so
+    none goes on beside the check; and a command's own exit code otherwise."""
+    started = tmp_path / "started"
+    command = ["sh", "-c", f'sleep 30 & echo $! > "{started}"; wait']
+    assert bootstrap.run(command, None, timeout=0.5) == bootstrap.TIMED_OUT
+    child = int(started.read_text())
+    # A signal is delivered as the kernel gets to it, so the child may take a moment
+    # to die once `run` returns: soon, it's gone, or a zombie no process has reaped
+    # yet, and not running.
+    deadline = time.monotonic() + 10
+    while _process_state(child) not in (None, "Z"):
+        assert time.monotonic() < deadline, f"{child} is still running"
+        time.sleep(0.01)
+    assert bootstrap.run(["sh", "-c", "exit 3"], None) == 3
+
+
+def _process_state(pid: int) -> str | None:
+    """A process's state, as /proc gives it, such as "R" or "Z", or None if it's
+    gone."""
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().split(")")[1].split()[0]
+    except FileNotFoundError:
+        return None
+
+
+def test_a_java_input_set_to_java_must_be_a_jdk_s(
+    tmp_path: Path, given: Release
+) -> None:
+    """action.yml gives the java input as empty when the workflow doesn't set it, so
+    one the workflow sets to `java`, its default's name, must be a JDK's, as any other
+    it sets must, and isn't taken as left at its default."""
+    given = with_java(given, tmp_path)
+    empty = job_bin(tmp_path / "empty")
+    variables = java_job(tmp_path, given, INVARITH_JOB_PATH=str(empty))
+    for left in ({}, {"INVARITH_JAVA": ""}):
+        code, said = bootstrapped(variables | left, Network(given), Commands())
+        assert code == 0, said
+        assert "::warning title=invarith::The project has a Java build" in said
+    variables["INVARITH_JAVA"] = "java"
+    code, said = bootstrapped(variables, Network(given), Commands())
+    assert code == 2
+    assert "The project's JDK, the java input, is java, but java wasn't found" in said
+
+
+def test_a_java_project_without_a_jdk_or_python(tmp_path: Path, given: Release) -> None:
+    """Without a JDK, a Java project is checked as one without a Java build, which
+    needs an interpreter: with neither, the step stops, saying no JDK was found, not
+    only the interpreter, and without first warning that it goes on."""
+    given = with_java(given, tmp_path)
+    empty = job_bin(tmp_path / "empty")
+    variables = java_job(
+        tmp_path, given, INVARITH_JOB_PATH=str(empty), INVARITH_PYTHON="python"
+    )
+    commands = Commands()
+    code, said = bootstrapped(variables, Network(given), commands)
+    assert code == 2
+    assert said == (
+        "::error title=invarith::The project has a Java build, but java wasn't "
+        "found, and no python was found either, so invarith has nothing to check it "
+        "on. Set up a JDK before the invarith step, such as with actions/setup-java, "
+        "or set the java input to the project's JDK's java.\n"
+    )
+    assert commands.run == []
+
+
+def test_a_java_project_without_a_jdk_and_a_python_too_old(
+    tmp_path: Path, given: Release
+) -> None:
+    """Without a JDK, and with a python the Python runtime can't be installed for, as
+    with none, the step stops, saying no JDK was found, without first warning that it
+    goes on."""
+    given = with_java(given, tmp_path)
+    without_jdk = job_bin(tmp_path / "no-jdk", "python")
+    python = without_jdk / "python"
+    variables = java_job(
+        tmp_path, given, INVARITH_JOB_PATH=str(without_jdk), INVARITH_PYTHON="python"
+    )
+    commands = Commands(exits={"--target": 1})
+    code, said = bootstrapped(variables, Network(given), commands)
+    assert code == 2
+    assert said == (
+        "::error title=invarith::The project has a Java build, but java wasn't "
+        f"found, and invarith's Python runtime couldn't be installed for {python} "
+        "either, its message above, so invarith has nothing to check it on. Set up a "
+        "JDK before the invarith step, such as with actions/setup-java, or set the "
+        "java input to the project's JDK's java.\n"
+    )
+    assert not any("check" in command for command, _ in commands.run)
 
 
 def test_a_java_build_that_can_t_give_its_classpath(

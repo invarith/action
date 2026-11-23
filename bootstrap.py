@@ -25,9 +25,10 @@ uv runs it on a Python it provides, with Python's standard library only. In orde
    markers is in the project's directory: TypeScript's for a `package.json`, and the
    Java tools for a Gradle or Maven build file. A TypeScript project needs its
    Node.js. A Java project needs its JDK's `java`, with a `javac` beside the one any
-   links lead to, if the `java` input is set; at its default, with none found, the
-   Java tools aren't installed, with a warning, since the project's build files
-   needn't mean its claims are bound in Java. Either needs no interpreter if the
+   links lead to, if the workflow sets the `java` input; left at its default, with
+   none found, the Java tools aren't installed, with a warning, since the project's
+   build files needn't mean its claims are bound in Java, and the project needs an
+   interpreter as a Python project does. Either needs no interpreter if the
    `python` input is its default and isn't found.
 4. **The job's OIDC token,** for invarith's audience, and with it, the Run API's
    short-lived links to the release's packages (`GET /v1/releases/{version}`).
@@ -49,9 +50,10 @@ uv runs it on a Python it provides, with Python's standard library only. In orde
      names. Then `invarith setup --language java --in-place` asks the project's own
      build, which the workflow has run, for its classpath where it is, on the job's
      PATH and without the job's means of asking for OIDC tokens, since it runs the
-     project's build scripts. A build that can't give it leaves each claim bound in
-     Java unknown, with a warning, since the project's build files needn't mean its
-     claims are bound in Java.
+     project's build scripts, and for at most the `minutes` input's time. A build
+     that can't give it, in that time, leaves each claim bound in Java unknown, with
+     a warning, since the project's build files needn't mean its claims are bound in
+     Java.
 
    The third-party packages are installed from the release's lists with
    `--require-hashes`, or from its lockfile, which pins each npm package with its
@@ -74,6 +76,7 @@ import hashlib
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tarfile
@@ -83,7 +86,7 @@ import urllib.request
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, NoReturn, TextIO, cast
+from typing import Any, NoReturn, Protocol, TextIO, cast
 
 # The audience the Run API accepts the job's OIDC token for.
 AUDIENCE = "https://invarith.ai"
@@ -150,8 +153,22 @@ class Answer:
 
 # Sends one GET request: the URL and the headers.
 type Fetch = Callable[[str, Mapping[str, str]], Answer]
-# Runs one command, with an environment if given, and gives its exit code.
-type Run = Callable[[Sequence[str], Mapping[str, str] | None], int]
+# The exit code a command gives when it's stopped at its time limit, as coreutils'
+# timeout gives.
+TIMED_OUT = 124
+
+
+class Run(Protocol):
+    """Runs one command, with an environment if given, and gives its exit code, or
+    TIMED_OUT if it's still running after `timeout` seconds, when it's stopped, with
+    every process it started."""
+
+    def __call__(
+        self,
+        command: Sequence[str],
+        environment: Mapping[str, str] | None,
+        timeout: float | None = None,
+    ) -> int: ...
 
 
 @dataclass(frozen=True)
@@ -178,7 +195,9 @@ class Release:
 @dataclass(frozen=True)
 class Inputs:
     """The action's inputs. `python` is the project's interpreter, or None if it
-    wasn't found; `python_given`, `node` and `java` are the inputs as given."""
+    wasn't found; `python_given`, `node` and `java` are the inputs as given, or their
+    defaults; and `java_set` is whether the workflow set the java input, which
+    action.yml gives as empty if it didn't."""
 
     server: str
     minutes: str
@@ -187,6 +206,7 @@ class Inputs:
     python_given: str
     node: str
     java: str
+    java_set: bool = False
 
 
 def fetch(url: str, headers: Mapping[str, str]) -> Answer:
@@ -200,12 +220,25 @@ def fetch(url: str, headers: Mapping[str, str]) -> Answer:
         raise Stop(f"{_host(url)} couldn't be reached: {_reason(error)}") from None
 
 
-def run(command: Sequence[str], environment: Mapping[str, str] | None) -> int:
-    return subprocess.run(
+def run(
+    command: Sequence[str],
+    environment: Mapping[str, str] | None,
+    timeout: float | None = None,
+) -> int:
+    # A command with a time limit runs in a session of its own, so stopping it stops
+    # every process it started, such as the build tool `invarith setup` runs, not
+    # only its own.
+    process = subprocess.Popen(
         list(command),
         env=None if environment is None else dict(environment),
-        check=False,
-    ).returncode
+        start_new_session=timeout is not None,
+    )
+    try:
+        return process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        os.killpg(process.pid, signal.SIGKILL)
+        process.wait()
+        return TIMED_OUT
 
 
 def main(
@@ -232,10 +265,12 @@ def bootstrap(
     inputs = read_inputs(environment)
     languages = project_languages(release, inputs.project)
     node = project_node(inputs.node, environment) if "typescript" in languages else None
-    java = project_java(inputs.java, environment, out) if "java" in languages else None
+    java, without_jdk = (
+        project_java(inputs, environment) if "java" in languages else (None, None)
+    )
     if java is None:
         languages = tuple(language for language in languages if language != "java")
-    python = project_python(inputs, languages, out)
+    python = project_python(inputs, languages, out, without_jdk=without_jdk)
     home = Path(_required(environment, "RUNNER_TEMP")) / "invarith"
     home.mkdir(parents=True, exist_ok=True)
     token = job_token(environment, send)
@@ -250,6 +285,14 @@ def bootstrap(
         # default that can't take the runtime, such as one too old, isn't fatal.
         optional = bool(languages) and inputs.python_given == DEFAULT_PYTHON
         tools = install_python(uv, release, downloaded, home, python, execute)
+        if tools is None and without_jdk is not None and not optional:
+            raise Stop(
+                f"The project has a Java build, but {without_jdk}, and invarith's "
+                f"Python runtime couldn't be installed for {python} either, its "
+                "message above, so invarith has nothing to check it on. Set up a JDK "
+                "before the invarith step, such as with actions/setup-java, or set "
+                "the java input to the project's JDK's java."
+            )
         if tools is None and not optional:
             raise Stop("uv couldn't install the Python runtime; its message is above.")
         if tools is None:
@@ -260,6 +303,9 @@ def bootstrap(
                 "check one, set the python input to the project's interpreter.",
                 file=out,
             )
+    if without_jdk is not None:
+        # Only once the step is known to go on: neither a JDK nor Python stops it.
+        print(java_warning(without_jdk), file=out)
     cli = str(home / "cli" / "bin" / "invarith")
     command = [
         cli,
@@ -281,7 +327,14 @@ def bootstrap(
         java_tools = install_java(release, downloaded, home)
         command += ["--java", java, "--java-tools", str(java_tools)]
         classpath = java_classpath(
-            cli, inputs.project, home, java_tools, environment, execute, out
+            cli,
+            inputs.project,
+            home,
+            java_tools,
+            inputs.minutes,
+            environment,
+            execute,
+            out,
         )
         if classpath is not None:
             command += ["--java-classpath", str(classpath)]
@@ -484,6 +537,7 @@ def read_inputs(environment: Mapping[str, str]) -> Inputs:
         python_given=given,
         node=environment.get("INVARITH_NODE") or DEFAULT_NODE,
         java=environment.get("INVARITH_JAVA") or DEFAULT_JAVA,
+        java_set=bool(environment.get("INVARITH_JAVA")),
     )
 
 
@@ -508,10 +562,19 @@ def _kind(languages: Sequence[str]) -> str:
     return " and ".join(LANGUAGES[language] for language in languages)
 
 
-def project_python(inputs: Inputs, languages: Sequence[str], out: TextIO) -> str | None:
+def project_python(
+    inputs: Inputs,
+    languages: Sequence[str],
+    out: TextIO,
+    *,
+    without_jdk: str | None = None,
+) -> str | None:
     """The project's interpreter. A project that needs another language's runtime
     needs none if the python input is its default and isn't found: Python's runtime
-    isn't installed, and a notice says so (invarith's D84 and D86)."""
+    isn't installed, and a notice says so (invarith's D84 and D86). A Java project
+    whose JDK wasn't found, `without_jdk` saying why, is checked as one without a
+    Java build, so it needs an interpreter: with none, the step stops, saying that
+    neither a JDK nor an interpreter was found, since either would do."""
     if inputs.python is not None:
         return inputs.python
     if languages and inputs.python_given == DEFAULT_PYTHON:
@@ -523,6 +586,13 @@ def project_python(inputs: Inputs, languages: Sequence[str], out: TextIO) -> str
             file=out,
         )
         return None
+    if without_jdk is not None and inputs.python_given == DEFAULT_PYTHON:
+        raise Stop(
+            f"The project has a Java build, but {without_jdk}, and no python was "
+            "found either, so invarith has nothing to check it on. Set up a JDK "
+            "before the invarith step, such as with actions/setup-java, or set the "
+            "java input to the project's JDK's java."
+        )
     raise Stop(
         f"The project's interpreter, {inputs.python_given}, wasn't found. Set the "
         "python input to the interpreter the project's dependencies are installed "
@@ -564,39 +634,44 @@ def project_node(given: str, environment: Mapping[str, str]) -> Node:
     return Node(node=node, npm=npm, path=path)
 
 
-def project_java(given: str, environment: Mapping[str, str], out: TextIO) -> str | None:
-    """The project's JDK's `java`, for a Java project: the java input, found on the
-    job's PATH if it's a name, and made absolute if it's a path, with any links it
-    goes through followed, to the JDK's own `java`, which needs a `javac` beside it to
-    compile the harnesses (invarith's D86). A link, such as `/usr/bin/java`, may lead
-    to one JDK while `/usr/bin/javac` leads to another.
+def project_java(
+    inputs: Inputs, environment: Mapping[str, str]
+) -> tuple[str | None, str | None]:
+    """The project's JDK's `java`, for a Java project, or None and why there's none:
+    the java input, found on the job's PATH if it's a name, and made absolute if it's
+    a path, with any links it goes through followed, to the JDK's own `java`, which
+    needs a `javac` beside it to compile the harnesses (invarith's D86). A link, such
+    as `/usr/bin/java`, may lead to one JDK while `/usr/bin/javac` leads to another.
 
-    With the java input at its default, a project needs no JDK: its build files
-    needn't mean its claims are bound in Java, so with none found, a warning says so,
-    the Java tools aren't installed, and each claim bound in Java is unknown. A java
-    input the workflow sets must be a JDK's."""
-    found = _executable(given, _job_path(environment))
+    With the java input left at its default, a project needs no JDK: its build files
+    needn't mean its claims are bound in Java, so with none found, the Java tools
+    aren't installed, and each claim bound in Java is unknown, which `java_warning`
+    says. A java input the workflow sets, even to `java`, must be a JDK's."""
+    found = _executable(inputs.java, _job_path(environment))
     java = None if found is None else os.path.realpath(found)
     javac = None if java is None else Path(java).with_name("javac")
     if java is not None and javac is not None and _runs(javac):
-        return java
+        return java, None
     if java is None:
-        problem = f"{given} wasn't found"
+        problem = f"{inputs.java} wasn't found"
     else:
         problem = f"there's no javac beside {java}, so it isn't a JDK's java"
-    if given == DEFAULT_JAVA:
-        print(
-            "::warning title=invarith::The project has a Java build, but "
-            f"{problem}, so invarith checks it without its Java tools, and each claim "
-            "bound in Java is unknown. To check one, set up a JDK before the invarith "
-            "step, such as with actions/setup-java, or set the java input to the "
-            "project's JDK's java.",
-            file=out,
-        )
-        return None
+    if not inputs.java_set:
+        return None, problem
     raise Stop(
-        f"The project's JDK, the java input, is {given}, but {problem}. Set the java "
-        "input to the java of the JDK the project builds with."
+        f"The project's JDK, the java input, is {inputs.java}, but {problem}. Set the "
+        "java input to the java of the JDK the project builds with."
+    )
+
+
+def java_warning(problem: str) -> str:
+    """The warning for a Java project checked without its Java tools, for want of a
+    JDK, and why."""
+    return (
+        f"::warning title=invarith::The project has a Java build, but {problem}, so "
+        "invarith checks it without its Java tools, and each claim bound in Java is "
+        "unknown. To check one, set up a JDK before the invarith step, such as with "
+        "actions/setup-java, or set the java input to the project's JDK's java."
     )
 
 
@@ -896,6 +971,7 @@ def java_classpath(
     project: Path,
     home: Path,
     tools: Path,
+    minutes: str,
     environment: Mapping[str, str],
     execute: Run,
     out: TextIO,
@@ -907,7 +983,9 @@ def java_classpath(
     OIDC tokens. A build that fails doesn't stop the step: a project's build files
     needn't mean its claims are bound in Java, which only the run says, so the check
     goes on without the classpath, each claim bound in Java unknown, saying why, and
-    a warning says the build failed."""
+    a warning says the build failed. So does a build still running after `minutes`,
+    the minutes input, which is stopped then, since the input bounds only the
+    check."""
     into = home / "java-setup"
     command = [
         cli,
@@ -924,7 +1002,18 @@ def java_classpath(
     ]
     build = {k: v for k, v in environment.items() if k not in TOKEN_VARIABLES}
     build["PATH"] = _job_path(environment)
-    if execute(command, build) != 0:
+    code = execute(command, build, timeout=float(minutes) * 60)
+    if code == TIMED_OUT:
+        print(
+            "::warning title=invarith::The project's Java build didn't give its "
+            f"classpath within {minutes} minutes, the minutes input, so it was "
+            "stopped. invarith checks the project without it, so each claim bound in "
+            "Java is unknown. Build the project before the invarith step, as its CI "
+            "does, so the build is up to date.",
+            file=out,
+        )
+        return None
+    if code != 0:
         print(
             "::warning title=invarith::The project's Java build couldn't give its "
             "classpath; its message is above. invarith checks the project without it, "

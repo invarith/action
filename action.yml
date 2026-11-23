@@ -11,7 +11,9 @@ inputs:
     required: false
     default: https://api-vrykmtpcja-uc.a.run.app
   minutes:
-    description: The run's total time, in minutes.
+    description: >-
+      The check's time, in minutes, which also limits a Java project's in-place
+      build, before the check.
     required: false
     default: "15"
   project:
@@ -34,9 +36,11 @@ inputs:
     description: >-
       The project's JDK's java, which runs the harnesses of a Java project, one with
       a Gradle or Maven build file, with the javac beside it compiling them: a name on
-      the PATH, or a path.
+      the PATH, or a path. Left empty, the default, it's the java on the PATH, and a
+      project with no JDK is checked without its Java tools, with a warning; set,
+      even to java, it must be a JDK's.
     required: false
-    default: java
+    default: ""
 
 runs:
   using: composite
