@@ -1534,10 +1534,17 @@ def test_a_java_build_that_runs_past_its_time(tmp_path: Path, given: Release) ->
     assert "--java-classpath" not in check
 
 
-def test_a_command_is_stopped_at_its_time_limit() -> None:
+def test_a_command_is_stopped_at_its_time_limit(tmp_path: Path) -> None:
     """`run` gives TIMED_OUT for a command still running at its time limit, which it
-    stops, and a command's own exit code otherwise."""
-    assert bootstrap.run(["sleep", "5"], None, timeout=0.2) == bootstrap.TIMED_OUT
+    stops with every process it started, as `invarith setup` starts the build's, so
+    none goes on beside the check; and a command's own exit code otherwise."""
+    started = tmp_path / "started"
+    command = ["sh", "-c", f'sleep 30 & echo $! > "{started}"; wait']
+    assert bootstrap.run(command, None, timeout=0.5) == bootstrap.TIMED_OUT
+    child = int(started.read_text())
+    stat = Path(f"/proc/{child}/stat")
+    # Gone, or a zombie no process has reaped yet, but not running.
+    assert not stat.exists() or stat.read_text().split(")")[1].split()[0] == "Z"
     assert bootstrap.run(["sh", "-c", "exit 3"], None) == 3
 
 
@@ -1579,6 +1586,31 @@ def test_a_java_project_without_a_jdk_or_python(tmp_path: Path, given: Release) 
         "or set the java input to the project's JDK's java.\n"
     )
     assert commands.run == []
+
+
+def test_a_java_project_without_a_jdk_and_a_python_too_old(
+    tmp_path: Path, given: Release
+) -> None:
+    """Without a JDK, and with a python the Python runtime can't be installed for, as
+    with none, the step stops, saying no JDK was found, without first warning that it
+    goes on."""
+    given = with_java(given, tmp_path)
+    without_jdk = job_bin(tmp_path / "no-jdk", "python")
+    python = without_jdk / "python"
+    variables = java_job(
+        tmp_path, given, INVARITH_JOB_PATH=str(without_jdk), INVARITH_PYTHON="python"
+    )
+    commands = Commands(exits={"--target": 1})
+    code, said = bootstrapped(variables, Network(given), commands)
+    assert code == 2
+    assert said == (
+        "::error title=invarith::The project has a Java build, but java wasn't "
+        f"found, and invarith's Python runtime couldn't be installed for {python} "
+        "either, its message above, so invarith has nothing to check it on. Set up a "
+        "JDK before the invarith step, such as with actions/setup-java, or set the "
+        "java input to the project's JDK's java.\n"
+    )
+    assert not any("check" in command for command, _ in commands.run)
 
 
 def test_a_java_build_that_can_t_give_its_classpath(

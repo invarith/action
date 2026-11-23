@@ -11,7 +11,9 @@ inputs:
     required: false
     default: https://api-vrykmtpcja-uc.a.run.app
   minutes:
-    description: The run's total time, in minutes.
+    description: >-
+      The check's time, in minutes, which also limits a Java project's in-place
+      build, before the check.
     required: false
     default: "15"
   project:

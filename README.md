@@ -86,7 +86,7 @@ A Maven project builds with `./mvnw --batch-mode verify`, or `mvn`, with `cache:
 | `node` | `node` | For a TypeScript or JavaScript project, one with a `package.json`, the project's Node.js: a name on the PATH, or a path |
 | `java` | the `java` on the PATH | For a Java project, one with a Gradle or Maven build file, the project's JDK's `java`, with a `javac` beside it: a name on the PATH, or a path. If the workflow sets it, even to `java`, it must be a JDK's |
 | `project` | `.` | The project's directory, holding `INVARITH.md` |
-| `minutes` | `15` | The run's total time, in minutes |
+| `minutes` | `15` | The check's time, in minutes, which also limits a Java project's in-place build, before the check |
 | `server` | invarith's | The invarith server's address |
 
 ## Pull requests from forks

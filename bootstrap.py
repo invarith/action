@@ -76,6 +76,7 @@ import hashlib
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tarfile
@@ -159,7 +160,8 @@ TIMED_OUT = 124
 
 class Run(Protocol):
     """Runs one command, with an environment if given, and gives its exit code, or
-    TIMED_OUT if it's still running after `timeout` seconds, when it's stopped."""
+    TIMED_OUT if it's still running after `timeout` seconds, when it's stopped, with
+    every process it started."""
 
     def __call__(
         self,
@@ -223,14 +225,19 @@ def run(
     environment: Mapping[str, str] | None,
     timeout: float | None = None,
 ) -> int:
+    # A command with a time limit runs in a session of its own, so stopping it stops
+    # every process it started, such as the build tool `invarith setup` runs, not
+    # only its own.
+    process = subprocess.Popen(
+        list(command),
+        env=None if environment is None else dict(environment),
+        start_new_session=timeout is not None,
+    )
     try:
-        return subprocess.run(
-            list(command),
-            env=None if environment is None else dict(environment),
-            check=False,
-            timeout=timeout,
-        ).returncode
+        return process.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
+        os.killpg(process.pid, signal.SIGKILL)
+        process.wait()
         return TIMED_OUT
 
 
@@ -264,8 +271,6 @@ def bootstrap(
     if java is None:
         languages = tuple(language for language in languages if language != "java")
     python = project_python(inputs, languages, out, without_jdk=without_jdk)
-    if without_jdk is not None:
-        print(java_warning(without_jdk), file=out)
     home = Path(_required(environment, "RUNNER_TEMP")) / "invarith"
     home.mkdir(parents=True, exist_ok=True)
     token = job_token(environment, send)
@@ -280,6 +285,14 @@ def bootstrap(
         # default that can't take the runtime, such as one too old, isn't fatal.
         optional = bool(languages) and inputs.python_given == DEFAULT_PYTHON
         tools = install_python(uv, release, downloaded, home, python, execute)
+        if tools is None and without_jdk is not None and not optional:
+            raise Stop(
+                f"The project has a Java build, but {without_jdk}, and invarith's "
+                f"Python runtime couldn't be installed for {python} either, its "
+                "message above, so invarith has nothing to check it on. Set up a JDK "
+                "before the invarith step, such as with actions/setup-java, or set "
+                "the java input to the project's JDK's java."
+            )
         if tools is None and not optional:
             raise Stop("uv couldn't install the Python runtime; its message is above.")
         if tools is None:
@@ -290,6 +303,9 @@ def bootstrap(
                 "check one, set the python input to the project's interpreter.",
                 file=out,
             )
+    if without_jdk is not None:
+        # Only once the step is known to go on: neither a JDK nor Python stops it.
+        print(java_warning(without_jdk), file=out)
     cli = str(home / "cli" / "bin" / "invarith")
     command = [
         cli,
