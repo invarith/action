@@ -100,7 +100,7 @@ GitHub gives a fork's workflows no OIDC token, so invarith doesn't verify a pull
 2. **`bootstrap.py`:**
    1. exits, with a notice, on a pull request from a fork;
    2. reads the invarith release this action release names, from `release/`;
-   3. finds the project's interpreter, and, for a TypeScript project, one with a `package.json`, its Node.js, and for a Java project, one with a Gradle or Maven build file, its JDK. Which files make a project need which runtime, the release's `invarith.json` lists;
+   3. finds the project's interpreter, and, for a TypeScript project, one with a `package.json`, its Node.js, and for a Java project, one with a Gradle or Maven build file, its JDK. Which files make a project need which runtime, the release's `invarith.json` lists, unless the `skip-languages` input leaves the language out;
    4. asks the job's OIDC token service for a token for invarith's audience, and invarith's server for short-lived links to that release's packages;
    5. downloads each package, and checks it against the SHA-256 in `release/`;
    6. installs them under `$RUNNER_TEMP/invarith`, never into the project's environment:

@@ -1655,11 +1655,11 @@ def test_skip_languages_leaves_java_out(tmp_path: Path, given: Release) -> None:
 
 
 def test_skip_languages_takes_spaces_and_commas(tmp_path: Path, given: Release) -> None:
-    """Languages are separated by spaces or commas, and one the project has no files
-    of is left out without a word."""
+    """Languages are separated by spaces or commas, in any case, and one the project
+    has no files of is left out without a word."""
     given = with_java(with_typescript(given, tmp_path), tmp_path)
     job = java_job(tmp_path, given)
-    for skipped in ("typescript, java", "java typescript", "java,typescript"):
+    for skipped in ("typescript, java", "java typescript", "Java,TypeScript"):
         variables = job | {"INVARITH_SKIP_LANGUAGES": skipped}
         commands = Commands()
         code, said = bootstrapped(variables, Network(given), commands)
@@ -1669,6 +1669,29 @@ def test_skip_languages_takes_spaces_and_commas(tmp_path: Path, given: Release) 
         check = commands.run[-1][0]
         assert "--java-tools" not in check
         assert "--typescript-tools" not in check
+
+
+def test_skip_languages_says_so_only_once_the_step_goes_on(
+    tmp_path: Path, given: Release
+) -> None:
+    """A project that leaves out its only other language is checked as a Python
+    project, so with no `python`, the step stops, without first saying it goes on
+    without the language's runtime."""
+    given = with_java(given, tmp_path)
+    variables = java_job(
+        tmp_path,
+        given,
+        INVARITH_JOB_PATH=str(job_bin(tmp_path / "empty")),
+        INVARITH_PYTHON="python",
+        INVARITH_SKIP_LANGUAGES="java",
+    )
+    code, said = bootstrapped(variables, Network(given), Commands())
+    assert code == 2
+    assert said == (
+        "::error title=invarith::The project's interpreter, python, wasn't found. "
+        "Set the python input to the interpreter the project's dependencies are "
+        "installed for.\n"
+    )
 
 
 @pytest.mark.parametrize("skipped", ["python", "kotlin", "java, Kotlin"])

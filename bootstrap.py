@@ -199,7 +199,8 @@ class Inputs:
     wasn't found; `python_given`, `node` and `java` are the inputs as given, or their
     defaults; `java_set` is whether the workflow set the java input, which
     action.yml gives as empty if it didn't; and `skipped` are the languages the
-    skip-languages input leaves out."""
+    skip-languages input leaves out, named in lower case, in whatever case it gives
+    them."""
 
     server: str
     minutes: str
@@ -266,18 +267,9 @@ def bootstrap(
     action = Path(_required(environment, "GITHUB_ACTION_PATH"))
     release = read_release(action / "release")
     inputs = read_inputs(environment)
-    languages = project_languages(release, inputs.project)
-    for language in languages:
-        if language in inputs.skipped:
-            name = LANGUAGES[language]
-            print(
-                f"::notice title=invarith::The project has {name} files, but the "
-                f"skip-languages input leaves {name} out, so invarith checks it "
-                f"without its {name} runtime, and can't check a claim bound in "
-                f"{name}.",
-                file=out,
-            )
-    languages = tuple(lang for lang in languages if lang not in inputs.skipped)
+    found = project_languages(release, inputs.project)
+    skipped = [language for language in found if language in inputs.skipped]
+    languages = tuple(language for language in found if language not in skipped)
     node = project_node(inputs.node, environment) if "typescript" in languages else None
     java, without_jdk = (
         project_java(inputs, environment) if "java" in languages else (None, None)
@@ -317,8 +309,16 @@ def bootstrap(
                 "check one, set the python input to the project's interpreter.",
                 file=out,
             )
+    # Only once the step is known to go on: neither a JDK nor Python stops it.
+    for language in skipped:
+        name = LANGUAGES[language]
+        print(
+            f"::notice title=invarith::The project has {name} files, but the "
+            f"skip-languages input leaves {name} out, so invarith checks it without "
+            f"its {name} runtime, and can't check a claim bound in {name}.",
+            file=out,
+        )
     if without_jdk is not None:
-        # Only once the step is known to go on: neither a JDK nor Python stops it.
         print(java_warning(without_jdk), file=out)
     cli = str(home / "cli" / "bin" / "invarith")
     command = [
@@ -544,7 +544,7 @@ def read_inputs(environment: Mapping[str, str]) -> Inputs:
     given = environment.get("INVARITH_PYTHON") or DEFAULT_PYTHON
     project = Path(environment.get("INVARITH_PROJECT", ".")).resolve()
     skipped = frozenset(
-        name
+        name.lower()
         for name in environment.get("INVARITH_SKIP_LANGUAGES", "")
         .replace(",", " ")
         .split()
