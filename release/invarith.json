@@ -1,20 +1,20 @@
 {
-  "version": "0.10.0",
+  "version": "0.11.0",
   "packages": {
-    "invarith_adapter_java-0.10.0-py3-none-any.whl": "cec68a9751884207d076c2f82eedf1cdd5840f86c5b5f57fd89b2a4041b54b76",
-    "invarith_adapter_python-0.10.0-py3-none-any.whl": "58a2f99c6097ca95c780005ce7f75ffed8357911b724b6a08bf314351a898e13",
-    "invarith_adapter_typescript-0.10.0-py3-none-any.whl": "c6da21164be6ada559f080e6f314d07c0aadb8443923b5bd28474e0cf2be6cac",
-    "invarith_cli-0.10.0-py3-none-any.whl": "b4cead80418a0aeb74146e459b716b321666d9d72ff8d185639337560619fbbe",
-    "invarith_core-0.10.0-py3-none-any.whl": "ed0106cd1ffaf21a088fe2371e9e9e1ff90c69a024956284d35ba4166dc9683e",
-    "invarith_runtime-0.10.0-py3-none-any.whl": "9d5c5b844931c0e45b3788e42addd2962ea143503c11411ce2ea387b3ac8a86b",
-    "invarith_verifier-0.10.0-py3-none-any.whl": "ef90bd7b0a7a6ecd5ddc550e8000730bef3f33b91f18c83576bc7540b7228a58"
+    "invarith_adapter_java-0.11.0-py3-none-any.whl": "2ed5e7a4c0ab618170e1a53a02aabba7069489f117652b83e666177b03e1827c",
+    "invarith_adapter_python-0.11.0-py3-none-any.whl": "bc1e687a0e9f459d9e6fd16eb4d926b1fe0cfc122bfaefee4d362c2adae5ae16",
+    "invarith_adapter_typescript-0.11.0-py3-none-any.whl": "3ed4f90e5e9c858a912ab2b92be4b1f5b191475c4df28190e1e219af3594f18d",
+    "invarith_cli-0.11.0-py3-none-any.whl": "09bad591ebcf9d0bfe6c451cb3036c9b678e2a99ad96ad2362cb732138ae2a91",
+    "invarith_core-0.11.0-py3-none-any.whl": "a69eaeb50e9bead393049bc300723fef8762ed22aacf452183790fe871d23cb1",
+    "invarith_runtime-0.11.0-py3-none-any.whl": "d4752310b5981730518d4ba627a8f8f000543b91c406adc42c148be77aa221a6",
+    "invarith_verifier-0.11.0-py3-none-any.whl": "5eee214e12da1bf42ebacfd18da941f6c15c50fa3d2fe88a709510cea5e39193"
   },
   "typescript_runtime": {
-    "invarith-typescript-runtime-0.10.0.tgz": "fa8759585e6065063d8d8c504a4ca4fec5a25382c5284c0f7d0989a4976152d8"
+    "invarith-typescript-runtime-0.11.0.tgz": "eeddffbfa3f6aefe9ed1d1a8f7b45671dbf4a17ff403f62b9bd99775612ab3ed"
   },
   "java_runtime": {
-    "invarith-maven-extension-0.10.0.jar": "c594a4bda7e30f152971bb22adc39a4d41a213766607bdf0d58324fdb4c55598",
-    "invarith-runtime-0.10.0.jar": "3e77016c1bec6a9c2b9e33ec98834d6f91153a140f27805c1377d325ccc1fa44"
+    "invarith-maven-extension-0.11.0.jar": "c594a4bda7e30f152971bb22adc39a4d41a213766607bdf0d58324fdb4c55598",
+    "invarith-runtime-0.11.0.jar": "ee0bbe5928fa66342cb00c4718793206029e5053c1389cac7f27d74f63ee4b0f"
   },
   "markers": {
     "java": [
